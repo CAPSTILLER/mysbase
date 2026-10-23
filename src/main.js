@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { initCloud, assetType } from './cloud.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
 // ---------- SIZE KEY (1 unit = 1 m) ----------
@@ -140,7 +141,7 @@ function addItem(type, opts = {}) {
   const def = CATALOG[type], g = new THREE.Group(); def.build(g)
   g.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } })
   const it = { id: opts.id ?? nextId++, type, group: g, preset: null, scale: 1, parent: null, wall: false,
-    allowed: opts.allowed ?? (type === 'figure' || type === 'rock' ? ['Tabletop'] : []) }
+    allowed: opts.allowed ?? (type === 'figure' || type === 'rock' ? ['Tabletop'] : def.asset ? [...(def.allowedPresets || [])] : []) }
   nextId = Math.max(nextId, it.id + 1)
   g.userData.item = it; scene.add(g); items.push(it)
   return it
@@ -296,15 +297,16 @@ function toggleView() { player.third = !player.third; $('bView').textContent = p
 function toggleDev() { dev = !dev; $('bDev').textContent = 'Dev mode: ' + (dev ? 'on' : 'off'); $('bDev').classList.toggle('on', dev); $('dev').classList.toggle('hidden', !dev); if (!dev) select(null) }
 $('bView').onclick = toggleView; $('bDev').onclick = toggleDev; $('bHelp').onclick = () => $('help').classList.toggle('hidden')
 let tt; function toast(t) { const m = $('msg'); m.textContent = t; m.style.opacity = 1; clearTimeout(tt); tt = setTimeout(() => m.style.opacity = 0, 1800) }
+function spawn(k) {
+  const d = CATALOG[k], it = addItem(k), f = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw))
+  const [x, z] = clampRoom(player.pos.x + f.x * 1.5, player.pos.z + f.z * 1.5, it)
+  it.group.rotation.y = Math.round((player.yaw + Math.PI) / DEG) * DEG
+  moveTo(it, x, d.wallOnly ? 1.15 : 0, z); if (d.wallOnly) it.wall = true
+  select(it); placing = true; toast(d.wallOnly ? 'Tap a wall to hang it' : 'Tap a spot to place it')
+}
 for (const [k, d] of Object.entries(CATALOG)) {
   const b = document.createElement('button'); b.textContent = '+ ' + d.name
-  b.onclick = () => {
-    const it = addItem(k), f = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw))
-    const [x, z] = clampRoom(player.pos.x + f.x * 1.5, player.pos.z + f.z * 1.5, it)
-    it.group.rotation.y = Math.round((player.yaw + Math.PI) / DEG) * DEG
-    moveTo(it, x, d.wallOnly ? 1.15 : 0, z); if (d.wallOnly) it.wall = true
-    select(it); placing = true; toast(d.wallOnly ? 'Tap a wall to hang it' : 'Tap a spot to place it')
-  }
+  b.onclick = () => spawn(k)
   $('palette').appendChild(b)
 }
 let step = 0.01
@@ -369,6 +371,7 @@ function deserialize(j) {
   presets = j.presets?.length ? j.presets : presets
   wallMat.color.set(j.wallPaint || '#d9cfc0'); $('paint').value = '#' + wallMat.color.getHexString()
   for (const d of j.items || []) {
+    if (!CATALOG[d.type] && String(d.type).startsWith('asset:')) CATALOG[d.type] = assetType(d.type)
     if (!CATALOG[d.type]) continue
     const it = addItem(d.type, { id: d.id, allowed: d.allowed || [] })
     const pr = d.preset && presets.find(p => p.name === d.preset)
@@ -404,13 +407,24 @@ new GLTFLoader().load('/assets/rock1-clay.glb', g => {
   rockTemplate = new THREE.Group(); rockTemplate.add(m)
   for (const it of items) if (it.type === 'rock') { it.group.clear(); it.group.add(rockTemplate.clone(true)) }
 }, undefined, () => toast('Rock model failed to load'))
+initCloud({
+  toast, spawn, serialize, deserialize,
+  registerType(t) { CATALOG[t] = assetType(t) },
+  refreshType(t) {
+    CATALOG[t] = assetType(t)
+    for (const it of items) if (it.type === t) { it.group.clear(); CATALOG[t].build(it.group); it.group.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true }) }
+    if (sel) refreshSel()
+  },
+  rebuildAssets() { for (const t of new Set(items.map(i => i.type))) if (t.startsWith('asset:')) this.refreshType(t) },
+})
 const saved = localStorage.getItem(LS)
 if (saved) { try { deserialize(JSON.parse(saved)) } catch { starter() } } else starter()
 if (new URLSearchParams(location.search).has('third')) toggleView()
 if (new URLSearchParams(location.search).has('dev')) toggleDev()
 
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix() }
-addEventListener('resize', resize); resize()
+function fitPanels() { const t = $('top').getBoundingClientRect().bottom + 6 + 'px'; $('dev').style.top = t; $('help').style.top = t; $('dev').style.maxHeight = `calc(100% - ${t} - 180px)` }
+addEventListener('resize', () => { resize(); fitPanels() }); resize(); fitPanels()
 const clock = new THREE.Clock()
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05)

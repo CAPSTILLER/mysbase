@@ -15,3 +15,9 @@ button.on{background:#2563eb;color:#fff}button:disabled{opacity:.4}
 .stick div{position:absolute;left:35px;top:35px;width:50px;height:50px;border-radius:50%;background:#fffa}
 #stickL{left:24px}#stickR{right:24px}
 body.touch .stick{display:block}
+
+input,select{font:inherit;padding:5px;border:1px solid #bbb;border-radius:6px;max-width:100%}
+#assetForm{background:#f3f6ff;border-radius:8px;padding:6px;margin:4px 0}
+#assetList .row{border-top:1px solid #eee;padding-top:4px}
+#wpick{position:fixed;inset:auto 8px 8px 8px;max-width:360px;margin:auto;background:#fff;border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;box-shadow:0 4px 20px #0008;z-index:10}
+@media (max-width:600px){#dev{max-height:calc(100% - 200px)}button{padding:9px 11px}}
