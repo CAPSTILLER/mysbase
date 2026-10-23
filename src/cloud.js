@@ -21,6 +21,8 @@ const UNITS = { m: 1, cm: 0.01, mm: 0.001, in: 0.0254, ft: 0.3048 }
 const MODEL_EXT = ['glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'usdz'], IMG_EXT = ['png', 'jpg', 'jpeg', 'webp']
 
 let app // hooks from main.js
+const CATS = ['prop','wall-mount','wall-layer','floor-layer','ceiling-layer','light']
+const catSel = def => `<div class="row"><span>Category</span><select id="afCat">${CATS.map(c => `<option ${c === def ? 'selected' : ''}>${c}</option>`).join('')}</select></div>`
 // ---------- wallet ----------
 const found = new Map()
 addEventListener('eip6963:announceProvider', e => found.set(e.detail.info.uuid, e.detail))
@@ -94,7 +96,7 @@ export function assetType(type) {
   const id = type.slice(6), m = metas.get(id)
   const size = m?.sizeM || [0.5, 0.5, 0.5]
   return {
-    name: m ? m.name : 'Private asset (connect + sign in)', size, allowedPresets: m?.allowedPresets || [], top: size[1], holds: !!m?.holds, wallOnly: !!m?.wall, asset: id,
+    name: m ? m.name : 'Private asset (connect + sign in)', size, allowedPresets: m?.allowedPresets || [], top: size[1], holds: !!m?.holds, wallOnly: !!m?.wall, asset: id, category: m?.category || (m?.wall ? 'wall-mount' : 'prop'),
     build(g) {
       const t = templates.get(id)
       if (t) { g.add(t.clone(true)); return }
@@ -150,7 +152,7 @@ async function refreshAssets() {
       del.onclick = async () => { if (!confirm(`Delete "${a.name}" from the server? Rooms using it will show a placeholder.`)) return; try { await call('mysbase-asset-delete', { id: a.id }); app.toast('Deleted'); refreshAssets() } catch (e) { err(e) } }
       row.append(place, del); box.appendChild(row)
     }
-    app.rebuildAssets()
+    app.rebuildAssets(); app.assetsChanged?.()
   } catch (e) { box.textContent = ''; err(e) }
 }
 function measure(obj) { const b = new THREE.Box3().setFromObject(obj); return b.getSize(new THREE.Vector3()) }
@@ -183,13 +185,13 @@ async function pick(f) {
     const img = await createImageBitmap(f), aspect = img.height / img.width
     const fm = form(`<b>Image: ${f.size > 1e6 ? (f.size / 1048576).toFixed(1) + ' MB' : Math.round(f.size / 1024) + ' KB'}, ${img.width}×${img.height}px</b>
       <div class="row"><span>Name</span><input id="afName"></div>
-      <div class="row"><span>Width</span><input id="afW" type="number" step="0.01" min="0.05" value="0.8"> m (hangs on walls)</div>
+      <div class="row"><span>Width</span><input id="afW" type="number" step="0.01" min="0.05" value="0.8"> m (hangs on walls; for layers = one tile's width)</div>${catSel('wall-mount')}
       <div class="row"><button id="afGo">Upload</button><button id="afX">Cancel</button></div>`)
     fm.querySelector('#afName').value = name; fm.querySelector('#afX').onclick = closeForm
     fm.querySelector('#afGo').onclick = () => run(async () => {
       const w = +fm.querySelector('#afW').value || 0.8
       await put(id, origFile, new Blob([buf], { type: f.type || 'image/' + ext }), 'Image')
-      return { id, name: fm.querySelector('#afName').value || name, kind: 'image', sourceFormat: ext, original: { file: origFile, sha256: await sha256(buf) }, sizeM: [w, +(w * aspect).toFixed(3), 0.02], wall: true }
+      return { id, name: fm.querySelector('#afName').value || name, kind: 'image', sourceFormat: ext, original: { file: origFile, sha256: await sha256(buf) }, sizeM: [w, +(w * aspect).toFixed(3), 0.02], wall: true, category: fm.querySelector('#afCat').value }
     })
     return
   }
@@ -213,7 +215,7 @@ async function pick(f) {
     <div class="row"><span>Units</span><select id="afU">${Object.keys(UNITS).map(u => `<option ${u === guess ? 'selected' : ''}>${u}</option>`).join('')}</select>
       <span class="small">or set the real height:</span><input id="afH" type="number" step="0.001" min="0.001"> m</div>
     <div class="row small" id="afSize"></div>
-    <div class="row"><label class="small"><input type="checkbox" id="afHolds"> things can stand on it</label><label class="small"><input type="checkbox" id="afWall"> wall-mounted</label><label class="small"><input type="checkbox" id="afTab" checked> allow Tabletop preset</label></div>
+    <div class="row"><label class="small"><input type="checkbox" id="afHolds"> things can stand on it</label><label class="small"><input type="checkbox" id="afWall"> wall-mounted</label><label class="small"><input type="checkbox" id="afTab" checked> allow Tabletop preset</label></div>${catSel('prop')}
     <div class="row"><button id="afGo">Convert to GLB &amp; upload</button><button id="afX">Cancel</button></div>`)
   const q = s => fm.querySelector(s)
   q('#afName').value = name; q('#afX').onclick = closeForm
@@ -235,7 +237,7 @@ async function pick(f) {
     await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original')
     const meta = { id, name: q('#afName').value || name, kind: 'model', sourceFormat: ext, original: { file: origFile, sha256: originalSha },
       sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit: q('#afH').value ? 'custom' : q('#afU').value, scale: s,
-      holds: q('#afHolds').checked, wall: q('#afWall').checked, allowedPresets: q('#afTab').checked ? ['Tabletop'] : [] }
+      holds: q('#afHolds').checked, wall: q('#afWall').checked, allowedPresets: q('#afTab').checked ? ['Tabletop'] : [], category: q('#afCat').value }
     if (glb && glb.byteLength <= MAX) {
       await put(id, 'model.glb', new Blob([glb], { type: 'model/gltf-binary' }), 'GLB')
       meta.model = { file: 'model.glb', sha256: await sha256(glb) }
@@ -262,7 +264,7 @@ async function saveServer() {
 async function loadServer(version = 0) {
   try {
     const r = await call('mysbase-room', { roomId: roomId(), version })
-    if (r.layout.items?.some(i => String(i.type).startsWith('asset:')) && !metas.size) await refreshAssets()
+    if (JSON.stringify(r.layout).includes('asset:') && !metas.size) await refreshAssets()
     app.deserialize(r.layout)
     const h = $('roomVer'); h.innerHTML = r.versions.map(v => `<option value="${v.version}">${v.version ? 'v-' + v.version : 'latest'} · ${new Date(v.savedAt).toLocaleString()}</option>`).join(''); h.value = String(version); h.classList.remove('hidden')
     app.toast(`Loaded "${r.roomId}" from server`)
@@ -284,4 +286,22 @@ export function initCloud(hooks) {
   $('bLoadSrv').onclick = () => loadServer(0)
   $('roomVer').onchange = e => loadServer(+e.target.value)
   paintWallet()
+}
+
+// ---------- for main.js: registry + surface layers ----------
+export const assetMetas = () => [...metas.values()]
+const layerSrc = new Map()
+/** Load an uploaded asset as a surface layer: {kind:'image', tex, sizeM} or {kind:'model', obj}. Needs sign-in. */
+export function layerSource(id) {
+  if (layerSrc.has(id)) return layerSrc.get(id)
+  const m = metas.get(id); if (!m) return Promise.reject(new Error('asset not loaded (sign in)'))
+  const p = (async () => {
+    if (m.kind === 'image') {
+      const u = await signedUrl(m.id, m.original.file)
+      let tex; try { tex = await new THREE.TextureLoader().setCrossOrigin('anonymous').loadAsync(u.url) } catch { tex = await new THREE.TextureLoader().loadAsync(u.proxy) }
+      tex.colorSpace = THREE.SRGBColorSpace; return { kind: 'image', tex, sizeM: m.sizeM || [1, 1, 0] }
+    }
+    return { kind: 'model', obj: await loadTemplate(m) }
+  })()
+  layerSrc.set(id, p); p.catch(() => layerSrc.delete(id)); return p
 }

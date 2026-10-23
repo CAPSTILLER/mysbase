@@ -1,0 +1,216 @@
+{
+  "version": 2,
+  "name": "Vault 42",
+  "room": {
+    "w": 5,
+    "d": 6,
+    "h": 3,
+    "wallT": 0.12,
+    "door": {
+      "w": 0.9,
+      "h": 2.1,
+      "x": 1.2
+    },
+    "units": "m"
+  },
+  "ambience": {
+    "background": "#04060a",
+    "hemiSky": "#3a5aa8",
+    "hemiGround": "#06080d",
+    "hemi": 0.45,
+    "key": 0,
+    "fill": 0,
+    "env": 0.06,
+    "exposure": 1.15
+  },
+  "surfaces": {
+    "walls": [
+      {
+        "asset": "core-layer:stone-blue",
+        "offsetM": 0,
+        "uvScale": [
+          1,
+          1
+        ],
+        "color": null
+      },
+      {
+        "asset": "core-layer:grime",
+        "offsetM": 0.002,
+        "uvScale": [
+          1,
+          1
+        ],
+        "color": null
+      },
+      null
+    ],
+    "floor": [
+      {
+        "asset": "core-layer:stone-floor",
+        "offsetM": 0,
+        "uvScale": [
+          1,
+          1
+        ],
+        "color": null
+      },
+      {
+        "asset": "core-layer:grime",
+        "offsetM": 0.001,
+        "uvScale": [
+          1.5,
+          1.5
+        ],
+        "color": null
+      },
+      null
+    ],
+    "ceiling": [
+      {
+        "asset": "core-layer:stone-scratched",
+        "offsetM": 0,
+        "uvScale": [
+          1,
+          1
+        ],
+        "color": null
+      },
+      null,
+      null
+    ],
+    "overrides": {
+      "north": [
+        {
+          "asset": "core-layer:stone-blue",
+          "offsetM": 0,
+          "uvScale": [
+            1.25,
+            1.25
+          ],
+          "color": null
+        },
+        {
+          "asset": "core-layer:grime",
+          "offsetM": 0.002,
+          "uvScale": [
+            1,
+            1
+          ],
+          "color": null
+        },
+        null
+      ]
+    }
+  },
+  "wallPaint": "#d9cfc0",
+  "presets": [
+    {
+      "name": "Tabletop",
+      "ratio": 0.1
+    }
+  ],
+  "lights": [
+    {
+      "id": 20,
+      "typeId": "core:light-point",
+      "kind": "point",
+      "color": "#4f74ff",
+      "intensity": 2.2,
+      "distance": 7,
+      "angle": 45,
+      "penumbra": 0.4,
+      "pos": [
+        0,
+        2.7,
+        0.4
+      ],
+      "rotY": 0,
+      "scale": 1,
+      "preset": null,
+      "parent": null,
+      "wall": false,
+      "face": null,
+      "allowed": [],
+      "assetId": null
+    },
+    {
+      "id": 21,
+      "typeId": "core:light-spot",
+      "kind": "spot",
+      "color": "#cfdcff",
+      "intensity": 6,
+      "distance": 6,
+      "angle": 30,
+      "penumbra": 0.6,
+      "pos": [
+        -1.6,
+        2.85,
+        -1.2
+      ],
+      "rotY": 0,
+      "scale": 1,
+      "preset": null,
+      "parent": null,
+      "wall": false,
+      "face": null,
+      "allowed": [],
+      "assetId": null
+    }
+  ],
+  "items": [
+    {
+      "id": 1,
+      "typeId": "core:vault-door",
+      "pos": [
+        0,
+        0.12,
+        -2.88
+      ],
+      "rotY": 0,
+      "scale": 1,
+      "preset": null,
+      "parent": null,
+      "wall": true,
+      "face": "north",
+      "allowed": [],
+      "assetId": null
+    },
+    {
+      "id": 2,
+      "typeId": "core:tally7",
+      "pos": [
+        2.49,
+        1.35,
+        -0.6
+      ],
+      "rotY": -90,
+      "scale": 1,
+      "preset": null,
+      "parent": null,
+      "wall": true,
+      "face": "east",
+      "allowed": [],
+      "assetId": null
+    },
+    {
+      "id": 3,
+      "typeId": "core:rock",
+      "pos": [
+        -0.9,
+        0,
+        -0.6
+      ],
+      "rotY": 200,
+      "scale": 1,
+      "preset": null,
+      "parent": null,
+      "wall": false,
+      "face": null,
+      "allowed": [
+        "Tabletop"
+      ],
+      "assetId": null
+    }
+  ]
+}

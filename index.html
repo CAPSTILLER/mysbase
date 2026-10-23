@@ -24,37 +24,58 @@
   <button id="bView">3rd person</button>
   <button id="bDev">Dev mode: off</button>
   <button id="bHelp">?</button>
+  <select id="roomSel" title="Built-in rooms (no wallet needed)"><option value="starter">Starter room</option><option value="vault42">Vault 42</option></select>
   <button id="bWallet">Connect wallet</button>
 </div>
 <div id="dev" class="hidden">
-  <div class="row"><span>Add</span><span id="palette"></span></div>
-  <div class="row"><span>Walls</span><input type="color" id="paint" value="#d9cfc0"></div>
-  <div class="row"><span>Room</span><button id="bSave">Save</button><button id="bLoad">Load</button><button id="bExport">Export</button><button id="bImport">Import</button><button id="bClear">Reset</button><input type="file" id="file" accept=".json,application/json" hidden></div>
-  <div class="row"><span>Server</span><input id="roomId" list="roomIds" size="12" maxlength="40" title="Room id (lowercase letters, digits, dashes)"><datalist id="roomIds"></datalist>
-    <button id="bSaveSrv">Save to server</button><button id="bLoadSrv">Load from server</button><select id="roomVer" class="hidden" title="Saved versions (last 10)"></select></div>
-  <div id="cloud" class="hidden">
-    <div class="row"><span>Assets</span><button id="bSignIn">Sign in</button><button id="bAssets">My assets</button><button id="bUpload">Upload…</button>
-      <input type="file" id="assetFile" hidden accept=".glb,.gltf,.obj,.stl,.ply,.fbx,.usdz,.png,.jpg,.jpeg,.webp">
-      <progress id="assetProg" class="hidden" max="100" value="0"></progress><span id="assetProgT" class="small"></span></div>
-    <div id="assetForm" class="hidden"></div>
-    <div id="assetList"></div>
-  </div>
-  <div class="row small">Private uploads + server rooms: CAPs Mind key holders only. Connecting is read-only.</div>
+  <div class="devhead"><b>Dev</b><button id="bDevMin">▾ Hide</button></div>
+  <div id="devBody">
   <div id="sel" class="hidden">
     <div class="row"><b id="selName"></b><button id="bMove">Move (tap a spot)</button><button id="bDel">Delete</button><button id="bDesel">Done</button></div>
     <div class="row"><span>Step</span><button class="step on" data-s="0.01">1 cm</button><button class="step" data-s="0.1">10 cm</button>
       <button data-n="x-">◀X</button><button data-n="x+">X▶</button><button data-n="z-">▲Z</button><button data-n="z+">Z▼</button><button data-n="y+" class="wallonly">Up</button><button data-n="y-" class="wallonly">Down</button></div>
     <div class="row"><span>Rotate</span><button data-r="-15">-15°</button><button data-r="-1">-1°</button><button data-r="1">+1°</button><button data-r="15">+15°</button></div>
+    <div class="row hidden" id="lightRow"><span>Light</span><select id="lKind"><option value="point">point</option><option value="spot">spot</option></select><input type="color" id="lColor">
+      <label class="small">int <input id="lInt" type="number" step="0.5" min="0" max="50" style="width:56px"></label><label class="small">dist m <input id="lDist" type="number" step="0.5" min="0" max="30" style="width:56px"></label><label class="small">angle° <input id="lAng" type="number" step="1" min="1" max="89" style="width:56px"></label></div>
     <div class="row"><span>Size</span><span id="presets"></span></div>
     <div class="row"><span>Scale</span><input type="range" id="scale" min="0.02" max="1" step="0.01" value="1"><span id="scaleVal">1:1</span><button id="bPreset">Save as preset</button></div>
     <div class="row small" id="selInfo"></div>
   </div>
+  <details open><summary>Add</summary><div class="row"><span id="palette"></span></div></details>
+  <details><summary>Room</summary>
+    <div class="row"><span>Walls</span><input type="color" id="paint" value="#d9cfc0"><span class="small">tints the plaster layer</span></div>
+    <div class="row"><span>Device</span><button id="bSave">Save</button><button id="bLoad">Load</button><button id="bClear">Reset</button></div>
+    <div class="row"><span>Server</span><input id="roomId" list="roomIds" size="12" maxlength="40" title="Room id (lowercase letters, digits, dashes)"><datalist id="roomIds"></datalist>
+      <button id="bSaveSrv">Save to server</button><button id="bLoadSrv">Load from server</button><select id="roomVer" class="hidden" title="Saved versions (last 10)"></select></div>
+  </details>
+  <details><summary>Surfaces (walls · floor · ceiling)</summary>
+    <div class="row"><span>Surface</span><select id="sfFace"><option value="walls">All walls</option><option value="floor">Floor</option><option value="ceiling">Ceiling</option><option value="north">North wall (override)</option><option value="south">South wall (override)</option><option value="east">East wall (override)</option><option value="west">West wall (override)</option></select>
+      <span class="small">offset step</span><button class="sfstep on" data-s="0.001">1 mm</button><button class="sfstep" data-s="0.01">1 cm</button></div>
+    <div id="sfLayers"></div>
+    <div class="small">Each layer sits 0–5 cm out from the one under it. Objects collide with the outermost layer.</div>
+  </details>
+  <details id="ioSec"><summary>JSON · export / import</summary>
+    <div class="row"><button id="bExport">Export</button><button id="bCopy">Copy JSON</button><button id="bPaste">Import pasted JSON</button><button id="bImport">Import file…</button><input type="file" id="file" accept=".json,application/json" hidden></div>
+    <div class="row"><button id="bReg">Export registry JSON</button><button id="bRegCopy">Copy registry</button></div>
+    <textarea id="ioText" rows="6" placeholder="Paste a room JSON (v1 or v2) here, then Import pasted JSON" spellcheck="false"></textarea>
+  </details>
+  <details><summary>My assets (private)</summary>
+    <div id="cloud" class="hidden">
+      <div class="row"><span>Assets</span><button id="bSignIn">Sign in</button><button id="bAssets">My assets</button><button id="bUpload">Upload…</button>
+        <input type="file" id="assetFile" hidden accept=".glb,.gltf,.obj,.stl,.ply,.fbx,.usdz,.png,.jpg,.jpeg,.webp">
+        <progress id="assetProg" class="hidden" max="100" value="0"></progress><span id="assetProgT" class="small"></span></div>
+      <div id="assetForm" class="hidden"></div>
+      <div id="assetList"></div>
+    </div>
+    <div class="row small">Private uploads + server rooms: CAPs Mind key holders only. Connecting is read-only.</div>
+  </details>
+  </div>
 </div>
 <div id="msg"></div>
-<div id="help" class="hidden"><b>Controls</b><br>
+<div id="help" class="hidden"><div class="devhead"><b>Controls</b><button id="bHelpX">✕</button></div>
 PC: WASD move · click the view to lock mouse look (Esc frees it) · V switch view · B dev mode · in dev: click to select / place (when locked, aims with the + ) · right-drag to look · Del delete · [ ] rotate 1° (Shift 15°)<br>
 Phone: left stick move · right stick look · tap to select / place in dev mode.<br>
-Sizes are real meters. Objects drop onto the first surface below, or snap flat to a wall when you tap a wall.</div>
+Sizes are real meters. Objects drop onto the first surface below, or snap flat to a wall when you tap a wall. Wall items show a ghost until you tap a wall.</div>
 <div class="stick" id="stickL"><div></div></div><div class="stick" id="stickR"><div></div></div>
 <script type="module" src="/src/main.js"></script>
 </body></html>

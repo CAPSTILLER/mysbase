@@ -21,3 +21,13 @@ input,select{font:inherit;padding:5px;border:1px solid #bbb;border-radius:6px;ma
 #assetList .row{border-top:1px solid #eee;padding-top:4px}
 #wpick{position:fixed;inset:auto 8px 8px 8px;max-width:360px;margin:auto;background:#fff;border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;box-shadow:0 4px 20px #0008;z-index:10}
 @media (max-width:600px){#dev{max-height:calc(100% - 200px)}button{padding:9px 11px}}
+#dev{width:min(560px,calc(100% - 16px))}
+.devhead{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px}
+details{border-top:1px solid #e5e5e5;padding:3px 0}summary{cursor:pointer;font-weight:700;color:#2563eb;padding:4px 0;list-style-position:inside}
+#sel{background:#eef3ff;border-radius:8px;padding:4px 6px;margin-bottom:4px}
+textarea{width:100%;font:11px ui-monospace,monospace;border:1px solid #bbb;border-radius:6px;padding:6px;user-select:text;touch-action:auto}
+#help{overflow:auto;width:340px}
+#top select{padding:6px;border-radius:8px;border:0;color:#2563eb;font-weight:600;box-shadow:0 1px 3px #0004}
+@media (min-width:701px){body.help-open #dev{width:min(560px,calc(100% - 372px))}}
+@media (max-width:700px){#help{left:8px;right:8px;width:auto;max-width:none}#dev{width:calc(100% - 16px)}}
+#palette{display:flex;flex-wrap:wrap;gap:4px;flex:1}#palette button{white-space:nowrap}

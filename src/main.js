@@ -1,16 +1,21 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import { initCloud, assetType } from './cloud.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { initCloud, assetType, assetMetas, layerSource } from './cloud.js'
+import { LAYERS, layerParts, buildVaultDoor, buildTally, buildWindow } from './builtins.js'
 
 // ---------- SIZE KEY (1 unit = 1 m) ----------
 const ROOM = { w: 5, d: 6, h: 3, wallT: 0.12 }
-const DOOR = { w: 0.9, h: 2.1, x: 1.2 } // in the south wall (z = +d/2)
+const DOOR = { w: 0.9, h: 2.1, x: 1.2 } // doorway in the south wall (z = +d/2)
 const AVATAR = { h: 1.8, r: 0.25, eye: 1.65 }
+const MAX_LIGHTS = 8, MAX_OFFSET = 0.05
 const SNAP_POS = 0.01, SNAP_ROT = 1
 const $ = id => document.getElementById(id)
 const snap = v => Math.round(v / SNAP_POS) * SNAP_POS
+const r3 = v => Math.round(v * 1000) / 1000
 const DEG = Math.PI / 180
+const V = (x, y, z) => new THREE.Vector3(x, y, z)
+const { w: W, d: D, h: H, wallT: T } = ROOM
 
 // ---------- renderer / scene ----------
 const canvas = $('c')
@@ -19,103 +24,171 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = THREE.PCFSoftShadowMap
 renderer.toneMapping = THREE.ACESFilmicToneMapping
-renderer.toneMappingExposure = 1.05
 const scene = new THREE.Scene()
-scene.background = new THREE.Color('#2a2622')
 const pmrem = new THREE.PMREMGenerator(renderer)
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
-scene.environmentIntensity = 0.35
 const camera = new THREE.PerspectiveCamera(70, 1, 0.03, 60)
-
-// soft "baked" look: warm sky/cool ground hemi + one big soft window key + ceiling fill
-scene.add(new THREE.HemisphereLight('#fff1dc', '#5a4f45', 0.9))
+const hemi = new THREE.HemisphereLight('#fff1dc', '#5a4f45', 0.9); scene.add(hemi)
 const key = new THREE.DirectionalLight('#ffe2b8', 1.6)
 key.position.set(-6, 5, -2); key.castShadow = true
 key.shadow.mapSize.set(2048, 2048); key.shadow.radius = 6; key.shadow.bias = -0.0005
 Object.assign(key.shadow.camera, { left: -5, right: 5, top: 5, bottom: -5, near: 0.5, far: 20 })
 scene.add(key)
 const fill = new THREE.PointLight('#ffd9a8', 6, 8, 1.6); fill.position.set(0.5, 2.7, 0.5); scene.add(fill)
-
-// ---------- room ----------
-const pickables = [] // meshes the pointer can hit
-const wallMat = new THREE.MeshStandardMaterial({ color: '#d9cfc0', roughness: 0.95 })
-const floorMat = new THREE.MeshStandardMaterial({ color: '#8a6a4c', roughness: 0.8 })
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.w, ROOM.d), floorMat)
-floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; floor.userData.kind = 'floor'
-scene.add(floor); pickables.push(floor)
-const ceil = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.w, ROOM.d), new THREE.MeshStandardMaterial({ color: '#efe8dc', roughness: 1 }))
-ceil.rotation.x = Math.PI / 2; ceil.position.y = ROOM.h; scene.add(ceil)
-// floor planks hint
-for (let x = -ROOM.w / 2 + 0.2; x < ROOM.w / 2; x += 0.2) {
-  const l = new THREE.Mesh(new THREE.PlaneGeometry(0.004, ROOM.d), new THREE.MeshBasicMaterial({ color: '#6e533b' }))
-  l.rotation.x = -Math.PI / 2; l.position.set(x, 0.001, 0); scene.add(l)
+const AMB_DEFAULT = { background: '#2a2622', hemiSky: '#fff1dc', hemiGround: '#5a4f45', hemi: 0.9, key: 1.6, fill: 6, env: 0.35, exposure: 1.05 }
+let ambience = { ...AMB_DEFAULT }
+function applyAmbience(a) {
+  ambience = { ...AMB_DEFAULT, ...(a || {}) }
+  scene.background = new THREE.Color(ambience.background); hemi.color.set(ambience.hemiSky); hemi.groundColor.set(ambience.hemiGround)
+  hemi.intensity = ambience.hemi; key.intensity = ambience.key; key.visible = ambience.key > 0; fill.intensity = ambience.fill; fill.visible = ambience.fill > 0
+  scene.environmentIntensity = ambience.env; renderer.toneMappingExposure = ambience.exposure
 }
+
+// ---------- room shell (pick targets) ----------
+const pickables = []
+const wallMat = new THREE.MeshStandardMaterial({ color: '#d9cfc0', roughness: 0.95 })
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(W, D), new THREE.MeshStandardMaterial({ color: '#3a3a3a', roughness: 0.9 }))
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; floor.userData.kind = 'floor'; scene.add(floor); pickables.push(floor)
+const ceil = new THREE.Mesh(new THREE.PlaneGeometry(W, D), new THREE.MeshStandardMaterial({ color: '#cfcac2', roughness: 1 }))
+ceil.rotation.x = Math.PI / 2; ceil.position.y = H; ceil.userData.kind = 'ceiling'; scene.add(ceil); pickables.push(ceil)
 const walls = []
-function wallBox(w, h, d, x, y, z, normal) {
+function wallBox(w, h, d, x, y, z, face) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat)
   m.position.set(x, y, z); m.receiveShadow = true; m.castShadow = true
-  m.userData.kind = 'wall'; m.userData.normal = normal
+  m.userData.kind = 'wall'; m.userData.face = face
   scene.add(m); pickables.push(m); walls.push(m)
 }
-const { w: W, d: D, h: H, wallT: T } = ROOM
-wallBox(W + 2 * T, H, T, 0, H / 2, -D / 2 - T / 2, new THREE.Vector3(0, 0, 1)) // north
-wallBox(T, H, D, -W / 2 - T / 2, H / 2, 0, new THREE.Vector3(1, 0, 0))   // west
-wallBox(T, H, D, W / 2 + T / 2, H / 2, 0, new THREE.Vector3(-1, 0, 0))   // east
-// south wall with doorway
-{ const n = new THREE.Vector3(0, 0, -1), z = D / 2 + T / 2, L = -W / 2 - T, R = W / 2 + T
-  const dl = DOOR.x - DOOR.w / 2, dr = DOOR.x + DOOR.w / 2
-  wallBox(dl - L, H, T, (L + dl) / 2, H / 2, z, n)
-  wallBox(R - dr, H, T, (dr + R) / 2, H / 2, z, n)
-  wallBox(DOOR.w, H - DOOR.h, T, DOOR.x, DOOR.h + (H - DOOR.h) / 2, z, n)
+wallBox(W + 2 * T, H, T, 0, H / 2, -D / 2 - T / 2, 'north')
+wallBox(T, H, D, -W / 2 - T / 2, H / 2, 0, 'west')
+wallBox(T, H, D, W / 2 + T / 2, H / 2, 0, 'east')
+{ const z = D / 2 + T / 2, L = -W / 2 - T, R = W / 2 + T, dl = DOOR.x - DOOR.w / 2, dr = DOOR.x + DOOR.w / 2
+  wallBox(dl - L, H, T, (L + dl) / 2, H / 2, z, 'south'); wallBox(R - dr, H, T, (dr + R) / 2, H / 2, z, 'south')
+  wallBox(DOOR.w, H - DOOR.h, T, DOOR.x, DOOR.h + (H - DOOR.h) / 2, z, 'south')
   const frame = new THREE.MeshStandardMaterial({ color: '#5b4330' })
   for (const [w, h, x, y] of [[0.05, DOOR.h, dl, DOOR.h / 2], [0.05, DOOR.h, dr, DOOR.h / 2], [DOOR.w + 0.1, 0.05, DOOR.x, DOOR.h]]) {
-    const f = new THREE.Mesh(new THREE.BoxGeometry(w, h, T + 0.04), frame); f.position.set(x, y, z); scene.add(f)
-  }
+    const f = new THREE.Mesh(new THREE.BoxGeometry(w, h, T + 0.2), frame); f.position.set(x, y, z - 0.04); scene.add(f) }
   const outside = new THREE.Mesh(new THREE.PlaneGeometry(DOOR.w, DOOR.h), new THREE.MeshBasicMaterial({ color: '#1b1814' }))
-  outside.position.set(DOOR.x, DOOR.h / 2, z + T / 2 + 0.01); outside.rotation.y = Math.PI; scene.add(outside)
+  outside.position.set(DOOR.x, DOOR.h / 2, z + T / 2 + 0.01); outside.rotation.y = Math.PI; scene.add(outside) }
+
+// ---------- surfaces: 3 layers per flat surface ----------
+// Face frame: point = o + u*U + v*V + n*N (n points into the room). Shape UVs are metres.
+const FACES = {
+  north: { o: V(0, 0, -D / 2), u: V(1, 0, 0), v: V(0, 1, 0), n: V(0, 0, 1), U: [-W / 2, W / 2], Vr: [0, H] },
+  south: { o: V(0, 0, D / 2), u: V(-1, 0, 0), v: V(0, 1, 0), n: V(0, 0, -1), U: [-W / 2, W / 2], Vr: [0, H], hole: [-DOOR.x - DOOR.w / 2, 0, -DOOR.x + DOOR.w / 2, DOOR.h] },
+  west: { o: V(-W / 2, 0, 0), u: V(0, 0, -1), v: V(0, 1, 0), n: V(1, 0, 0), U: [-D / 2, D / 2], Vr: [0, H] },
+  east: { o: V(W / 2, 0, 0), u: V(0, 0, 1), v: V(0, 1, 0), n: V(-1, 0, 0), U: [-D / 2, D / 2], Vr: [0, H] },
+  floor: { o: V(0, 0, 0), u: V(1, 0, 0), v: V(0, 0, -1), n: V(0, 1, 0), U: [-W / 2, W / 2], Vr: [-D / 2, D / 2] },
+  ceiling: { o: V(0, H, 0), u: V(1, 0, 0), v: V(0, 0, 1), n: V(0, -1, 0), U: [-W / 2, W / 2], Vr: [-D / 2, D / 2] },
 }
-// glowing window on west wall (light source for the mockup look)
-{ const win = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.2), new THREE.MeshBasicMaterial({ color: '#fff4dd' }))
-  win.position.set(-W / 2 + 0.005, 1.65, -0.8); win.rotation.y = Math.PI / 2; scene.add(win) }
-// baseboard
-for (const wm of walls) if (wm.position.y === H / 2) {
-  const n = wm.userData.normal, b = new THREE.Mesh(new THREE.BoxGeometry(
-    n.x ? 0.02 : wm.geometry.parameters.width, 0.08, n.z ? 0.02 : wm.geometry.parameters.depth),
-    new THREE.MeshStandardMaterial({ color: '#efe6d6' }))
-  b.position.set(wm.position.x + n.x * (T / 2 + 0.01), 0.04, wm.position.z + n.z * (T / 2 + 0.01)); scene.add(b)
+const WALL_FACES = ['north', 'south', 'east', 'west']
+const layer = (asset, o = {}) => ({ asset, offsetM: 0, uvScale: [1, 1], color: null, ...o })
+const DEFAULT_SURFACES = () => ({ walls: [layer('core-layer:plaster'), null, null], floor: [layer('core-layer:wood-floor'), null, null],
+  ceiling: [layer('core-layer:plaster', { color: '#efe8dc' }), null, null], overrides: {} })
+let surfaces = DEFAULT_SURFACES()
+const outer = { north: 0, south: 0, east: 0, west: 0, floor: 0, ceiling: 0 } // outermost layer depth per face (m)
+const bounds = () => ({ x0: -W / 2 + outer.west, x1: W / 2 - outer.east, z0: -D / 2 + outer.north, z1: D / 2 - outer.south, y0: outer.floor, y1: H - outer.ceiling })
+function normLayers(a) { const out = [0, 1, 2].map(i => { const L = a?.[i]; if (!L || !L.asset) return null
+  return { asset: String(L.asset), offsetM: Math.max(0, Math.min(MAX_OFFSET, +L.offsetM || 0)), uvScale: Array.isArray(L.uvScale) ? [+L.uvScale[0] || 1, +(L.uvScale[1] ?? L.uvScale[0]) || 1] : [+L.uvScale || 1, +L.uvScale || 1], color: L.color || null } }); return out }
+function normSurfaces(s) {
+  const d = DEFAULT_SURFACES(), o = { walls: normLayers(s?.walls ?? d.walls), floor: normLayers(s?.floor ?? d.floor), ceiling: normLayers(s?.ceiling ?? d.ceiling), overrides: {} }
+  for (const f of WALL_FACES) if (s?.overrides?.[f]) o.overrides[f] = normLayers(s.overrides[f])
+  return o
+}
+const layersFor = f => f === 'floor' ? surfaces.floor : f === 'ceiling' ? surfaces.ceiling : surfaces.overrides[f] || surfaces.walls
+const catFor = f => f === 'floor' ? 'floor-layer' : f === 'ceiling' ? 'ceiling-layer' : 'wall-layer'
+const shapeGeo = {}
+function faceGeo(f) {
+  if (shapeGeo[f]) return shapeGeo[f]
+  const F = FACES[f], s = new THREE.Shape()
+  s.moveTo(F.U[0], F.Vr[0]); s.lineTo(F.U[1], F.Vr[0]); s.lineTo(F.U[1], F.Vr[1]); s.lineTo(F.U[0], F.Vr[1]); s.closePath()
+  if (F.hole) { const [a, b, c, d] = F.hole, h = new THREE.Path(); h.moveTo(a, b + 0.001); h.lineTo(a, d); h.lineTo(c, d); h.lineTo(c, b + 0.001); h.closePath(); s.holes.push(h) }
+  return (shapeGeo[f] = new THREE.ShapeGeometry(s))
+}
+const resolved = new Map() // 'asset:<id>' -> {kind,tex,sizeM}|{kind:'model',obj}
+let surfGroup = null
+function layerMaterial(f, L) {
+  const b = LAYERS[L.asset], up = resolved.get(L.asset)
+  let parts, tile
+  if (b) { parts = layerParts(L.asset); tile = b.tileM } else if (up?.kind === 'image') { parts = { map: up.tex }; tile = [up.sizeM[0] || 1, up.sizeM[1] || 1] } else return null
+  const o = { roughness: 0.9, ...parts }
+  for (const k of ['map', 'emissiveMap']) if (parts[k]) { const t = parts[k].clone(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / (tile[0] * L.uvScale[0]), 1 / (tile[1] * L.uvScale[1])); t.needsUpdate = true; o[k] = t }
+  o.color = L.color || (b?.paintable && WALL_FACES.includes(f) ? '#' + wallMat.color.getHexString() : '#ffffff')
+  return new THREE.MeshStandardMaterial(o)
+}
+function modelTiles(f, L, obj) {
+  const F = FACES[f], wrap = new THREE.Group(), inner = obj.clone(true)
+  if (f === 'floor' || f === 'ceiling') inner.rotation.x = Math.PI / 2
+  wrap.add(inner); wrap.scale.set(L.uvScale[0], L.uvScale[1], 1); wrap.updateMatrixWorld(true)
+  const bb = new THREE.Box3().setFromObject(wrap), sz = bb.getSize(V()); inner.position.sub(bb.min.clone().divide(wrap.scale))
+  const tw = Math.max(sz.x, 0.05), th = Math.max(sz.y, 0.05), nu = Math.ceil((F.U[1] - F.U[0]) / tw), nv = Math.ceil((F.Vr[1] - F.Vr[0]) / th)
+  const g = new THREE.Group()
+  if (nu * nv > 400) { toast(`Layer tile too small (${nu * nv} copies) — raise uvScale`); return { g, t: sz.z } }
+  for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) { const c = wrap.clone(true); c.position.set(F.U[0] + i * tw, F.Vr[0] + j * th, 0); g.add(c) }
+  g.traverse(o => { if (o.isMesh) o.receiveShadow = true })
+  return { g, t: sz.z }
+}
+function buildSurfaces() {
+  if (surfGroup) { scene.remove(surfGroup); surfGroup.traverse(o => { if (o.isMesh && o.material?.isMaterial && !o.userData.shared) o.material.dispose() }) }
+  surfGroup = new THREE.Group(); scene.add(surfGroup)
+  for (const f of Object.keys(FACES)) {
+    const F = FACES[f], basis = new THREE.Matrix4().makeBasis(F.u, F.v, F.n)
+    let depth = 0, n = 0
+    for (const L of layersFor(f)) {
+      if (!L) continue
+      depth += L.offsetM; n++
+      const N = depth + n * 0.0006
+      let obj = null, thick = 0
+      if (L.asset.startsWith('asset:') && !resolved.has(L.asset)) {
+        layerSource(L.asset.slice(6)).then(r => { resolved.set(L.asset, r); buildSurfaces(); reflow() }).catch(() => {})
+      }
+      const up = resolved.get(L.asset)
+      if (up?.kind === 'model') { const t = modelTiles(f, L, up.obj); obj = t.g; thick = t.t }
+      else { const m = layerMaterial(f, L); if (m) { obj = new THREE.Mesh(faceGeo(f), m); obj.receiveShadow = true; obj.userData.shared = false } }
+      if (!obj) continue
+      obj.matrixAutoUpdate = false; obj.matrix.copy(basis).setPosition(F.o.clone().addScaledVector(F.n, N)); surfGroup.add(obj)
+      depth += thick
+    }
+    outer[f] = r3(depth + n * 0.0006)
+  }
 }
 
-// ---------- asset catalog (real sizes) ----------
+// ---------- catalog (real sizes; pivot = base centre; front faces +z) ----------
 const std = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 })
-function box(g, w, h, d, x, y, z, c) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), std(c))
-  m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; g.add(m); return m
-}
+function box(g, w, h, d, x, y, z, c) { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), std(c)); m.position.set(x, y, z); g.add(m); return m }
 let rockTemplate = null
 const CATALOG = {
-  bed: { name: 'Bed', size: [1.5, 0.95, 2.0], top: 0.55, holds: true, build(g) {
+  'core:bed': { name: 'Bed', category: 'prop', size: [1.5, 0.95, 2.0], top: 0.55, holds: true, build(g) {
     box(g, 1.5, 0.35, 2.0, 0, 0.175, 0, '#6b4a33'); box(g, 1.44, 0.2, 1.9, 0, 0.45, 0.03, '#e9e4da')
     box(g, 1.5, 0.95, 0.06, 0, 0.475, -0.97, '#5b3d29'); box(g, 0.55, 0.1, 0.35, -0.38, 0.6, -0.72, '#fff'); box(g, 0.55, 0.1, 0.35, 0.38, 0.6, -0.72, '#fff')
     box(g, 1.46, 0.04, 1.1, 0, 0.57, 0.42, '#3b5f8a') } },
-  desk: { name: 'Desk', size: [1.4, 0.75, 0.7], top: 0.75, holds: true, build(g) {
+  'core:desk': { name: 'Desk', category: 'prop', size: [1.4, 0.75, 0.7], top: 0.75, holds: true, build(g) {
     box(g, 1.4, 0.04, 0.7, 0, 0.73, 0, '#9a7350')
     for (const [x, z] of [[-0.66, -0.31], [0.66, -0.31], [-0.66, 0.31], [0.66, 0.31]]) box(g, 0.05, 0.71, 0.05, x, 0.355, z, '#3a2c22') } },
-  bookshelf: { name: 'Bookshelf', size: [0.9, 2.0, 0.35], top: 2.0, holds: true, build(g) {
+  'core:bookshelf': { name: 'Bookshelf', category: 'prop', size: [0.9, 2.0, 0.35], top: 2.0, holds: true, build(g) {
     box(g, 0.9, 2.0, 0.03, 0, 1.0, -0.16, '#6b4a33'); box(g, 0.03, 2.0, 0.35, -0.435, 1, 0, '#6b4a33'); box(g, 0.03, 2.0, 0.35, 0.435, 1, 0, '#6b4a33')
     const cols = ['#8a3b2e', '#2f5d7c', '#c9a227', '#4f7a4a', '#7a4f8a']
     for (let i = 0; i < 5; i++) { const y = 0.015 + i * 0.4; box(g, 0.84, 0.03, 0.33, 0, y, 0, '#7b583d')
       if (i < 4) for (let b = 0; b < 9; b++) box(g, 0.07, 0.22 + (b % 3) * 0.04, 0.24, -0.36 + b * 0.085, y + 0.14 + (b % 3) * 0.02, 0.02, cols[(b + i) % 5]) }
     box(g, 0.84, 0.03, 0.35, 0, 1.985, 0, '#6b4a33') } },
-  ent: { name: 'Entertainment center', size: [1.8, 0.6, 0.5], top: 0.6, holds: true, build(g) {
+  'core:ent': { name: 'Entertainment center', category: 'prop', size: [1.8, 0.6, 0.5], top: 0.6, holds: true, build(g) {
     box(g, 1.8, 0.6, 0.5, 0, 0.3, 0, '#3d3029'); box(g, 0.56, 0.4, 0.01, -0.58, 0.3, 0.251, '#54443a'); box(g, 0.56, 0.4, 0.01, 0.58, 0.3, 0.251, '#54443a') } },
-  tv: { name: 'TV 55"', size: [1.23, 0.75, 0.2], top: 0.75, holds: false, build(g) {
+  'core:tv': { name: 'TV 55"', category: 'prop', size: [1.23, 0.75, 0.2], top: 0.75, build(g) {
     box(g, 1.23, 0.71, 0.04, 0, 0.42, 0, '#111'); box(g, 0.3, 0.05, 0.2, 0, 0.025, 0, '#222') } },
-  painting: { name: 'Painting', size: [0.8, 0.6, 0.04], top: 0.6, holds: false, wallOnly: true, build(g) {
+  'core:painting': { name: 'Painting', category: 'wall-mount', size: [0.8, 0.6, 0.04], top: 0.6, wallOnly: true, build(g) {
     box(g, 0.8, 0.6, 0.04, 0, 0.3, 0, '#2b2219'); const c = box(g, 0.72, 0.52, 0.01, 0, 0.3, 0.021, '#c96f3b')
     c.material = new THREE.MeshStandardMaterial({ map: paintingTex(), roughness: 0.9 }) } },
-  figure: { name: 'Avatar figure 1.8 m', size: [0.5, 1.8, 0.3], top: 1.8, holds: false, build(g) { g.add(makeAvatarMesh('#9fb7d9')) } },
-  rock: { name: 'Rock #1', size: [0, 2.08, 0], top: 2.08, holds: false, build(g) {
+  'core:window': { name: 'Glowing window', category: 'wall-mount', size: [1.5, 1.25, 0.04], top: 1.25, wallOnly: true, build: buildWindow },
+  'core:vault-door': { name: 'Round bronze vault door', category: 'wall-mount', size: [1.8, 1.8, 0.22], top: 1.8, wallOnly: true, lights: 1, build: buildVaultDoor },
+  'core:tally7': { name: 'Tally marks (7)', category: 'wall-mount', size: [0.5, 0.25, 0.004], top: 0.25, wallOnly: true, build: buildTally },
+  'core:figure': { name: 'Avatar figure 1.8 m', category: 'prop', size: [0.5, 1.8, 0.3], top: 1.8, presets: ['Tabletop'], build(g) { g.add(makeAvatarMesh('#9fb7d9')) } },
+  'core:rock': { name: 'CAPs Rock avatar', category: 'prop', size: [0.6, 2.08, 0.4], top: 2.08, presets: ['Tabletop'], build(g) {
     if (rockTemplate) g.add(rockTemplate.clone(true)); else box(g, 0.6, 2.08, 0.4, 0, 1.04, 0, '#aaa') } },
+  'core:light-point': { name: 'Point light', category: 'light', size: [0.12, 0.12, 0.12], top: 0.12, light: 'point', build: g => bulb(g) },
+  'core:light-spot': { name: 'Spot light', category: 'light', size: [0.14, 0.12, 0.14], top: 0.12, light: 'spot', build: g => bulb(g, true) },
+}
+function bulb(g, spot) {
+  const m = new THREE.Mesh(spot ? new THREE.ConeGeometry(0.07, 0.12, 16, 1, true) : new THREE.SphereGeometry(0.06, 16, 12), new THREE.MeshBasicMaterial({ color: '#fff', side: THREE.DoubleSide }))
+  m.position.y = 0.06; m.userData.bulb = true; g.add(m)
 }
 function paintingTex() {
   const c = document.createElement('canvas'); c.width = 128; c.height = 96; const x = c.getContext('2d')
@@ -127,120 +200,201 @@ function makeAvatarMesh(color) {
   const g = new THREE.Group()
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(AVATAR.r, AVATAR.h - 2 * AVATAR.r, 6, 16), std(color))
   body.position.y = AVATAR.h / 2; body.castShadow = true; g.add(body)
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.07, 0.1), std('#1f2a44'))
-  visor.position.set(0, AVATAR.eye, 0.2); g.add(visor) // faces +z
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.07, 0.1), std('#1f2a44')); visor.position.set(0, AVATAR.eye, 0.2); g.add(visor)
   return g
 }
+const def = t => CATALOG[t] || (String(t).startsWith('asset:') ? (CATALOG[t] = assetType(t)) : null)
 
 // ---------- items ----------
-let items = [] // {id,type,group,preset,scale,parent,wall,allowed:[]}
+let items = [] // {id,type,group,preset,scale,parent,wall,face,allowed,light?,pending?}
 let presets = [{ name: 'Tabletop', ratio: 0.1 }]
 let nextId = 1
-function topOf(it) { return it.group.position.y + CATALOG[it.type].top * it.scale }
+const isLight = it => !!def(it.type).light
+const solid = it => !it.wall && !it.pending && !isLight(it)
+function topOf(it) { return it.group.position.y + def(it.type).top * it.scale }
 function addItem(type, opts = {}) {
-  const def = CATALOG[type], g = new THREE.Group(); def.build(g)
-  g.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } })
-  const it = { id: opts.id ?? nextId++, type, group: g, preset: null, scale: 1, parent: null, wall: false,
-    allowed: opts.allowed ?? (type === 'figure' || type === 'rock' ? ['Tabletop'] : def.asset ? [...(def.allowedPresets || [])] : []) }
+  const d = def(type), g = new THREE.Group(); d.build(g)
+  g.traverse(o => { if (o.isMesh && !o.userData.bulb) o.castShadow = o.receiveShadow = true })
+  const it = { id: opts.id ?? nextId++, type, group: g, preset: null, scale: 1, parent: null, wall: false, face: null,
+    allowed: opts.allowed ?? [...(d.presets || d.allowedPresets || [])] }
+  if (d.light) { it.light = { kind: d.light, color: '#ffe8c4', intensity: 3, distance: 6, angle: 45, penumbra: 0.4, ...(opts.light || {}) }; applyLight(it) }
   nextId = Math.max(nextId, it.id + 1)
   g.userData.item = it; scene.add(g); items.push(it)
   return it
 }
-function setScale(it, s) { it.scale = s; it.group.scale.setScalar(s) }
-function footprintHas(it, x, z) {
-  const b = new THREE.Box3().setFromObject(it.group); return x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z
+function lightCount() { return items.reduce((n, it) => n + (isLight(it) ? 1 : def(it.type).lights || 0), 0) }
+function applyLight(it) {
+  const g = it.group, L = it.light
+  for (const c of [...g.children]) if (c.isLight || c.userData.lightTarget) g.remove(c)
+  const col = new THREE.Color(L.color)
+  const l = L.kind === 'spot' ? new THREE.SpotLight(col, L.intensity, L.distance, Math.max(1, Math.min(89, L.angle)) * DEG, L.penumbra, 1.5) : new THREE.PointLight(col, L.intensity, L.distance, 1.5)
+  l.position.y = 0.06; g.add(l)
+  if (l.isSpotLight) { const t = new THREE.Object3D(); t.userData.lightTarget = true; t.position.set(0, it.wall ? -0.6 : -1, it.wall ? 1 : 0.0001); g.add(t); l.target = t }
+  g.traverse(o => { if (o.userData.bulb) o.material.color.copy(col) })
 }
+function setScale(it, s) { it.scale = s; it.group.scale.setScalar(s) }
+const ibox = it => new THREE.Box3().setFromObject(it.group)
+function footprintHas(it, x, z) { const b = ibox(it); return x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z }
 function descendants(it) { const out = []; for (const o of items) if (o.parent === it.id) out.push(o, ...descendants(o)); return out }
-// drop to first surface below current bottom
+function ancestors(it) { const out = []; let p = it.parent; while (p != null) { const o = items.find(i => i.id === p); if (!o || out.includes(o)) break; out.push(o); p = o.parent } return out }
 function drop(it) {
-  if (it.wall) return
+  if (it.wall || isLight(it)) return
   const bottom = it.group.position.y, p = it.group.position, ex = new Set([it, ...descendants(it)])
-  let best = 0, parent = null
+  let best = bounds().y0, parent = null
   for (const o of items) {
-    if (ex.has(o) || !CATALOG[o.type].holds) continue
+    if (ex.has(o) || !def(o.type).holds || o.pending) continue
     const t = topOf(o)
     if (t <= bottom + 0.05 && t > best && footprintHas(o, p.x, p.z)) { best = t; parent = o.id }
   }
-  moveTo(it, p.x, best, p.z); it.parent = parent
+  moveTo(it, p.x, best, p.z); it.group.position.y = best; it.parent = parent
 }
 function clampRoom(x, z, it) {
-  const b = new THREE.Box3().setFromObject(it.group), hx = (b.max.x - b.min.x) / 2, hz = (b.max.z - b.min.z) / 2
-  return [Math.min(W / 2 - hx, Math.max(-W / 2 + hx, x)), Math.min(D / 2 - hz, Math.max(-D / 2 + hz, z))]
+  const b = ibox(it), c = it.group.position, B = bounds()
+  const lx = c.x - b.min.x, rx = b.max.x - c.x, lz = c.z - b.min.z, rz = b.max.z - c.z
+  return [Math.min(B.x1 - rx, Math.max(B.x0 + lx, x)), Math.min(B.z1 - rz, Math.max(B.z0 + lz, z))]
 }
 function moveTo(it, x, y, z) {
-  const p = it.group.position, dx = snap(x) - p.x, dy = snap(y) - p.y, dz = snap(z) - p.z
-  for (const o of [it, ...descendants(it)]) o.group.position.set(snap(o.group.position.x + dx), snap(o.group.position.y + dy), snap(o.group.position.z + dz))
+  const p = it.group.position, dx = snap(x) - p.x, dy = y - p.y, dz = snap(z) - p.z
+  for (const o of [it, ...descendants(it)]) o.group.position.set(snap(o.group.position.x + dx), o.group.position.y + dy, snap(o.group.position.z + dz))
+}
+// object-object collision: push `it` (with whatever sits on it) out of other solid items' AABBs
+function resolve(it) {
+  if (!solid(it)) return
+  const skip = new Set([it, ...descendants(it), ...ancestors(it)])
+  for (let k = 0; k < 6; k++) {
+    const b = ibox(it); let moved = false
+    for (const o of items) {
+      if (skip.has(o) || !solid(o) || descendants(o).includes(it)) continue
+      const q = ibox(o)
+      if (b.min.y >= q.max.y - 0.01 || b.max.y <= q.min.y + 0.01) continue
+      const px = Math.min(b.max.x - q.min.x, q.max.x - b.min.x), pz = Math.min(b.max.z - q.min.z, q.max.z - b.min.z)
+      if (px <= 0.001 || pz <= 0.001) continue
+      const p = it.group.position, cb = b.getCenter(V()), cq = q.getCenter(V())
+      let x = p.x, z = p.z
+      if (px < pz) x += (cb.x >= cq.x ? 1 : -1) * (px + 0.01); else z += (cb.z >= cq.z ? 1 : -1) * (pz + 0.01)
+      ;[x, z] = clampRoom(x, z, it); moveTo(it, x, p.y, z); moved = true; break
+    }
+    if (!moved) return
+  }
 }
 function rotate(it, deg) {
   const r = Math.round((it.group.rotation.y / DEG + deg) / SNAP_ROT) * SNAP_ROT
   const c = it.group.position, dr = r * DEG - it.group.rotation.y
-  for (const o of descendants(it)) { // orbit children with parent
-    const v = o.group.position.clone().sub(c).applyAxisAngle(new THREE.Vector3(0, 1, 0), dr)
-    o.group.position.set(snap(c.x + v.x), o.group.position.y, snap(c.z + v.z)); o.group.rotation.y += dr
-  }
+  for (const o of descendants(it)) { const v = o.group.position.clone().sub(c).applyAxisAngle(V(0, 1, 0), dr); o.group.position.set(snap(c.x + v.x), o.group.position.y, snap(c.z + v.z)); o.group.rotation.y += dr }
   it.group.rotation.y = r * DEG
 }
-
-// place selected item at a picked hit
-function placeAt(it, hit) {
-  const kind = hit.object.userData.kind, def = CATALOG[it.type]
+// put an item flat against a wall face at a hit point (respects the outermost surface layer)
+function wallPose(it, face, pt, mount) {
+  const d = def(it.type), F = FACES[face], n = F.n, dep = (d.size[2] || 0.3) * it.scale / 2, B = bounds(), h = d.size[1] * it.scale
+  it.group.rotation.y = Math.atan2(n.x, n.z)
+  let y = mount ? Math.max(B.y0, Math.min(B.y1 - h, pt.y - h / 2)) : it.group.position.y
+  if (isLight(it)) y = Math.max(B.y0, Math.min(B.y1 - h, pt.y))
+  it.group.position.y = y
+  let [x, z] = clampRoom(pt.x, pt.z, it)
+  const off = outer[face] + dep + 0.001
+  if (n.x) x = F.o.x + n.x * off; if (n.z) z = F.o.z + n.z * off
+  moveTo(it, x, y, z); it.group.position.set(it.group.position.x, y, it.group.position.z)
+}
+function placeAt(it, hit, preview = false) {
+  const kind = hit.object.userData.kind, d = def(it.type)
   if (kind === 'wall') {
-    const n = hit.object.userData.normal, dep = (def.size[2] || 0.3) * it.scale / 2
-    it.group.rotation.y = Math.atan2(n.x, n.z)
     for (const o of descendants(it)) o.parent = null
-    it.wall = def.wallOnly; it.parent = null
-    const y = def.wallOnly ? hit.point.y - def.size[1] * it.scale / 2 : 0
-    let x = hit.point.x + n.x * dep, z = hit.point.z + n.z * dep
-    it.group.position.y = y; [x, z] = clampRoom(x, z, it); if (n.x) x = hit.point.x + n.x * (dep + 0.001); if (n.z) z = hit.point.z + n.z * (dep + 0.001)
-    moveTo(it, x, Math.max(0, Math.min(H - def.size[1] * it.scale, y)), z)
+    const mount = !!d.wallOnly || isLight(it)
+    wallPose(it, hit.object.userData.face, hit.point, mount)
+    if (preview) return true
+    it.wall = mount; it.face = mount ? hit.object.userData.face : null; it.parent = null
+    if (isLight(it)) applyLight(it)
+    if (!mount) { it.group.position.y = bounds().y0; resolve(it) }
     return true
   }
-  if (def.wallOnly) { toast('Paintings go on walls — tap a wall'); return false }
-  let y = 0, parent = null
+  if (preview) return false
+  if (d.wallOnly) { toast(`${d.name}: tap a wall`); return false }
+  if (kind === 'ceiling') { if (!isLight(it)) { toast('Only lights go on the ceiling'); return false }
+    it.wall = false; it.face = null; moveTo(it, ...[...clampRoom(hit.point.x, hit.point.z, it)].flatMap((v, i) => i ? [v] : [v, bounds().y1 - 0.14])); applyLight(it); return true }
+  if (isLight(it)) { const [x, z] = clampRoom(hit.point.x, hit.point.z, it); it.wall = false; it.face = null; moveTo(it, x, Math.max(it.group.position.y, bounds().y0 + 0.3), z); applyLight(it); return true }
+  let y = bounds().y0, parent = null
   if (kind === 'item') {
     const o = hit.object.userData.itemRef
     if (o === it || descendants(it).includes(o)) return false
-    if (!CATALOG[o.type].holds || hit.face.normal.clone().transformDirection(hit.object.matrixWorld).y < 0.7) { toast(`${CATALOG[o.type].name} can't hold things there`); return false }
+    if (!def(o.type).holds || hit.face.normal.clone().transformDirection(hit.object.matrixWorld).y < 0.7) { toast(`${def(o.type).name} can't hold things there`); return false }
     y = topOf(o); parent = o.id
   }
-  it.wall = false; it.group.position.y = y
+  it.wall = false; it.face = null
   const [x, z] = clampRoom(hit.point.x, hit.point.z, it)
   moveTo(it, x, y, z); it.group.position.y = y; it.parent = parent
   if (parent == null) drop(it)
+  resolve(it)
   return true
+}
+// re-seat everything after surface layers change
+function reflow() {
+  for (const it of items) {
+    if (it.pending) continue
+    if (it.wall && it.face) { const p = it.group.position; wallPose(it, it.face, V(p.x, p.y + def(it.type).size[1] * it.scale / 2, p.z), true); if (isLight(it)) it.group.position.y = p.y }
+    else if (!isLight(it) && it.parent == null) { const p = it.group.position; const [x, z] = clampRoom(p.x, p.z, it); moveTo(it, x, bounds().y0, z) }
+  }
+  for (const it of items) if (!it.wall && !isLight(it) && it.parent != null) { const o = items.find(i => i.id === it.parent); if (o) moveTo(it, it.group.position.x, topOf(o), it.group.position.z) }
+  for (const it of items) resolve(it)
+  if (sel) refreshSel()
+}
+
+// ---------- ghost preview ----------
+function setGhost(it, on) {
+  it.group.traverse(o => {
+    if (!o.isMesh) return
+    if (on) { o.userData.realMat = o.material; o.material = (Array.isArray(o.material) ? o.material : [o.material]).map(m => { const c = m.clone(); c.transparent = true; c.opacity = 0.4; c.depthWrite = false; return c }); if (o.material.length === 1) o.material = o.material[0]; o.castShadow = false }
+    else if (o.userData.realMat) { o.material = o.userData.realMat; delete o.userData.realMat; o.castShadow = !o.userData.bulb }
+  })
 }
 
 // ---------- avatar / camera ----------
-const player = { pos: new THREE.Vector3(0, 0, 2.2), yaw: Math.PI, pitch: -0.1, third: false }
-const avatar = makeAvatarMesh('#2563eb'); scene.add(avatar)
+const player = { pos: V(0, 0, 2.2), yaw: Math.PI, pitch: -0.1, third: false }
+const avatar = makeAvatarMesh('#2563eb'); avatar.userData.localPlayer = true; scene.add(avatar)
 function updateCamera() {
-  avatar.position.copy(player.pos); avatar.rotation.y = player.yaw; avatar.visible = player.third
-  const dir = new THREE.Vector3(Math.sin(player.yaw) * Math.cos(player.pitch), Math.sin(player.pitch), Math.cos(player.yaw) * Math.cos(player.pitch))
-  const eye = player.pos.clone().setY(AVATAR.eye)
+  avatar.position.copy(player.pos).setY(bounds().y0); avatar.rotation.y = player.yaw
+  avatar.visible = player.third // never draw your own body in first person
+  const dir = V(Math.sin(player.yaw) * Math.cos(player.pitch), Math.sin(player.pitch), Math.cos(player.yaw) * Math.cos(player.pitch))
+  const eye = player.pos.clone().setY(bounds().y0 + AVATAR.eye), B = bounds()
   if (!player.third) { camera.position.copy(eye); camera.lookAt(eye.clone().add(dir)) }
   else {
-    const back = eye.clone().addScaledVector(dir, -2.6).add(new THREE.Vector3(0, 0.5, 0))
-    back.x = Math.max(-W / 2 + 0.1, Math.min(W / 2 - 0.1, back.x)); back.z = Math.max(-D / 2 + 0.1, Math.min(D / 2 - 0.1, back.z)); back.y = Math.min(H - 0.1, back.y)
+    const back = eye.clone().addScaledVector(dir, -2.6).add(V(0, 0.5, 0))
+    back.x = Math.max(B.x0 + 0.1, Math.min(B.x1 - 0.1, back.x)); back.z = Math.max(B.z0 + 0.1, Math.min(B.z1 - 0.1, back.z)); back.y = Math.min(B.y1 - 0.1, back.y)
     camera.position.copy(back); camera.lookAt(eye.clone().addScaledVector(dir, 1))
   }
+}
+// avatar vs furniture (AABB in x/z, things you can't step over)
+function collideAvatar() {
+  const p = player.pos, r = AVATAR.r, y0 = bounds().y0
+  for (const it of items) {
+    if (!solid(it)) continue
+    const b = ibox(it); if (b.max.y < y0 + 0.25 || b.min.y > y0 + 1.2) continue
+    const x0 = b.min.x - r, x1 = b.max.x + r, z0 = b.min.z - r, z1 = b.max.z + r
+    if (p.x <= x0 || p.x >= x1 || p.z <= z0 || p.z >= z1) continue
+    const m = [[p.x - x0, 'x', x0], [x1 - p.x, 'x', x1], [p.z - z0, 'z', z0], [z1 - p.z, 'z', z1]].sort((a, b) => a[0] - b[0])[0]
+    p[m[1]] = m[2]
+  }
+  const B = bounds(); p.x = Math.max(B.x0 + r, Math.min(B.x1 - r, p.x)); p.z = Math.max(B.z0 + r, Math.min(B.z1 - r, p.z))
 }
 
 // ---------- input ----------
 const keys = {}, moveIn = { x: 0, y: 0 }, lookIn = { x: 0, y: 0 }
+const typing = e => ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)
 addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return
+  if (typing(e)) return
   keys[e.code] = true
   if (e.code === 'KeyV') toggleView(); if (e.code === 'KeyB') toggleDev()
   if (sel && (e.code === 'Delete' || e.code === 'Backspace')) delSel()
-  if (sel && e.code === 'BracketLeft') { rotate(sel, e.shiftKey ? -15 : -1); refreshSel() }
-  if (sel && e.code === 'BracketRight') { rotate(sel, e.shiftKey ? 15 : 1); refreshSel() }
+  if (sel && e.code === 'BracketLeft') { rotate(sel, e.shiftKey ? -15 : -1); resolve(sel); refreshSel() }
+  if (sel && e.code === 'BracketRight') { rotate(sel, e.shiftKey ? 15 : 1); resolve(sel); refreshSel() }
+  if (e.code === 'Escape' && sel?.pending) delSel()
 })
 addEventListener('keyup', e => keys[e.code] = false)
 const locked = () => document.pointerLockElement === canvas
-let down = null, rdrag = false
+let down = null, rdrag = false, aim = null
 canvas.addEventListener('contextmenu', e => e.preventDefault())
-canvas.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId, type: e.pointerType }; rdrag = e.button === 2 })
+canvas.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, id: e.pointerId }; rdrag = e.button === 2 })
 addEventListener('pointermove', e => {
+  if (e.pointerType === 'mouse') aim = { x: e.clientX, y: e.clientY }
   if (locked()) { look(e.movementX, e.movementY); return }
   if (down && down.id === e.pointerId && (rdrag || (e.pointerType === 'mouse' && !dev && e.buttons === 1))) look(e.movementX, e.movementY)
 })
@@ -253,8 +407,8 @@ canvas.addEventListener('pointerup', e => {
 })
 document.addEventListener('pointerlockchange', () => $('cross').style.display = locked() ? 'block' : 'none')
 function look(dx, dy) { player.yaw -= dx * 0.0025; player.pitch = Math.max(-1.4, Math.min(1.4, player.pitch - dy * 0.0025)) }
-// thumbsticks
-if (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window) document.body.classList.add('touch')
+const touch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window
+if (touch) document.body.classList.add('touch')
 function stick(el, out) {
   const knob = el.firstElementChild; let pid = null, cx = 0, cy = 0
   el.addEventListener('pointerdown', e => { pid = e.pointerId; el.setPointerCapture(pid); const r = el.getBoundingClientRect(); cx = r.left + r.width / 2; cy = r.top + r.height / 2; mv(e) })
@@ -269,62 +423,81 @@ stick($('stickL'), moveIn); stick($('stickR'), lookIn)
 // ---------- picking / selection ----------
 const ray = new THREE.Raycaster()
 let sel = null, placing = false, helper = null
+function castFrom(cx, cy, targets) { ray.setFromCamera(new THREE.Vector2(cx / innerWidth * 2 - 1, -cy / innerHeight * 2 + 1), camera); return ray.intersectObjects(targets, false) }
 function pickAt(cx, cy) {
-  ray.setFromCamera(new THREE.Vector2(cx / innerWidth * 2 - 1, -cy / innerHeight * 2 + 1), camera)
   const targets = [...pickables]
   for (const it of items) it.group.traverse(o => { if (o.isMesh) { o.userData.kind = 'item'; o.userData.itemRef = it; targets.push(o) } })
-  const hits = ray.intersectObjects(targets, false).filter(h => !(placing && sel && h.object.userData.itemRef && (h.object.userData.itemRef === sel)))
-  const hit = hits[0]; if (!hit) return
-  if (placing && sel) { if (placeAt(sel, hit)) { placing = false; refreshSel(); toast('Placed') } return }
+  const hits = (placing && sel?.pending) ? castFrom(cx, cy, walls) : castFrom(cx, cy, targets).filter(h => !(placing && sel && h.object.userData.itemRef === sel))
+  const hit = hits[0]; if (!hit) { if (placing && sel?.pending) toast('Tap a wall to hang it'); return }
+  if (placing && sel) {
+    if (placeAt(sel, hit)) { const was = sel.pending; if (was) { sel.pending = false; setGhost(sel, false) } placing = false; refreshSel(); toast(sel.wall ? `Placed on the ${sel.face} wall` : 'Placed') }
+    return
+  }
   if (hit.object.userData.kind === 'item') select(hit.object.userData.itemRef); else select(null)
 }
 function select(it) {
+  if (sel && sel !== it && sel.pending) { const p = sel; sel = null; removeItem(p) }
   sel = it; placing = false
   if (helper) { scene.remove(helper); helper = null }
   if (it) { helper = new THREE.BoxHelper(it.group, '#2563eb'); scene.add(helper) }
   refreshSel()
 }
-function delSel() {
-  if (!sel) return; const it = sel
+function removeItem(it) {
   for (const o of items) if (o.parent === it.id) o.parent = null
-  scene.remove(it.group); items = items.filter(o => o !== it); select(null)
-  for (const o of items) drop(o)
+  scene.remove(it.group); items = items.filter(o => o !== it)
 }
+function delSel() { if (!sel) return; const it = sel; sel = null; removeItem(it); select(null); for (const o of items) drop(o) }
 
 // ---------- UI ----------
 let dev = false
 function toggleView() { player.third = !player.third; $('bView').textContent = player.third ? '1st person' : '3rd person' }
-function toggleDev() { dev = !dev; $('bDev').textContent = 'Dev mode: ' + (dev ? 'on' : 'off'); $('bDev').classList.toggle('on', dev); $('dev').classList.toggle('hidden', !dev); if (!dev) select(null) }
-$('bView').onclick = toggleView; $('bDev').onclick = toggleDev; $('bHelp').onclick = () => $('help').classList.toggle('hidden')
-let tt; function toast(t) { const m = $('msg'); m.textContent = t; m.style.opacity = 1; clearTimeout(tt); tt = setTimeout(() => m.style.opacity = 0, 1800) }
+function toggleDev() { dev = !dev; $('bDev').textContent = 'Dev mode: ' + (dev ? 'on' : 'off'); $('bDev').classList.toggle('on', dev); $('dev').classList.toggle('hidden', !dev); if (!dev) select(null); fitPanels() }
+function toggleHelp(force) {
+  const open = force ?? $('help').classList.contains('hidden'); $('help').classList.toggle('hidden', !open); document.body.classList.toggle('help-open', open)
+  if (open && innerWidth <= 700) setDevMin(true); fitPanels()
+}
+function setDevMin(min) { $('devBody').classList.toggle('hidden', min); $('bDevMin').textContent = min ? '▸ Show' : '▾ Hide' }
+$('bView').onclick = toggleView; $('bDev').onclick = toggleDev; $('bHelp').onclick = () => toggleHelp(); $('bHelpX').onclick = () => toggleHelp(false)
+$('bDevMin').onclick = () => { const min = !$('devBody').classList.contains('hidden'); setDevMin(min); if (!min && innerWidth <= 700) toggleHelp(false) }
+let tt; function toast(t, ms = 2200) { const m = $('msg'); m.textContent = t; m.style.opacity = 1; clearTimeout(tt); tt = setTimeout(() => m.style.opacity = 0, ms) }
 function spawn(k) {
-  const d = CATALOG[k], it = addItem(k), f = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw))
-  const [x, z] = clampRoom(player.pos.x + f.x * 1.5, player.pos.z + f.z * 1.5, it)
+  const d = def(k); if (!d) return
+  if ((d.light || d.lights) && lightCount() + (d.lights || 1) > MAX_LIGHTS) return toast(`Max ${MAX_LIGHTS} lights (phone performance)`)
+  if (sel?.pending) { const p = sel; sel = null; removeItem(p) }
+  const it = addItem(k), f = V(Math.sin(player.yaw), 0, Math.cos(player.yaw))
   it.group.rotation.y = Math.round((player.yaw + Math.PI) / DEG) * DEG
-  moveTo(it, x, d.wallOnly ? 1.15 : 0, z); if (d.wallOnly) it.wall = true
-  select(it); placing = true; toast(d.wallOnly ? 'Tap a wall to hang it' : 'Tap a spot to place it')
+  if (d.wallOnly) { // ghost until a wall is tapped
+    it.pending = true; setGhost(it, true); moveTo(it, player.pos.x + f.x * 1.5, 1.2, player.pos.z + f.z * 1.5)
+    select(it); placing = true; toast('Ghost preview — tap a wall to hang it'); return
+  }
+  const [x, z] = clampRoom(player.pos.x + f.x * 1.5, player.pos.z + f.z * 1.5, it)
+  moveTo(it, x, d.light ? bounds().y1 - 0.3 : bounds().y0, z); if (d.light) applyLight(it); else resolve(it)
+  select(it); placing = true; toast(d.light ? 'Tap the ceiling, a wall or the floor to place the light' : 'Tap a spot to place it')
 }
-for (const [k, d] of Object.entries(CATALOG)) {
-  const b = document.createElement('button'); b.textContent = '+ ' + d.name
-  b.onclick = () => spawn(k)
-  $('palette').appendChild(b)
+function buildPalette() {
+  $('palette').innerHTML = ''
+  for (const [k, d] of Object.entries(CATALOG)) {
+    if (k.startsWith('asset:')) continue
+    const b = document.createElement('button'); b.textContent = '+ ' + d.name; b.onclick = () => spawn(k); $('palette').appendChild(b)
+  }
 }
+buildPalette()
 let step = 0.01
 document.querySelectorAll('.step').forEach(b => b.onclick = () => { step = +b.dataset.s; document.querySelectorAll('.step').forEach(o => o.classList.toggle('on', o === b)) })
 document.querySelectorAll('[data-n]').forEach(b => b.onclick = () => {
-  if (!sel) return; const p = sel.group.position, n = b.dataset.n, s = n[1] === '+' ? step : -step
-  let x = p.x, y = p.y, z = p.z; if (n[0] === 'x') x += s; if (n[0] === 'z') z += s; if (n[0] === 'y') y = Math.max(0, Math.min(H - 0.1, y + s))
-  if (!sel.wall) { [x, z] = clampRoom(x, z, sel); moveTo(sel, x, y, z); sel.group.position.y = Math.max(sel.group.position.y, 0); const t = sel.group.position.y; sel.group.position.y = t + 5; drop(sel) }
-  else moveTo(sel, x, y, z)
+  if (!sel || sel.pending) return; const p = sel.group.position, n = b.dataset.n, s = n[1] === '+' ? step : -step, B = bounds()
+  let x = p.x, y = p.y, z = p.z; if (n[0] === 'x') x += s; if (n[0] === 'z') z += s; if (n[0] === 'y') y = Math.max(B.y0, Math.min(B.y1 - 0.1, y + s))
+  if (sel.wall || isLight(sel)) { moveTo(sel, x, y, z); if (sel.wall && sel.face) wallPose(sel, sel.face, V(sel.group.position.x, sel.group.position.y + def(sel.type).size[1] * sel.scale / 2, sel.group.position.z), true) }
+  else { [x, z] = clampRoom(x, z, sel); moveTo(sel, x, p.y, z); sel.group.position.y += 5; drop(sel); resolve(sel) }
   refreshSel()
 })
-document.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { if (sel) { rotate(sel, +b.dataset.r); refreshSel() } })
+document.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { if (sel && !sel.wall) { rotate(sel, +b.dataset.r); resolve(sel); refreshSel() } })
 $('bMove').onclick = () => { if (sel) { placing = !placing; refreshSel(); if (placing) toast('Tap a floor, a surface or a wall') } }
 $('bDel').onclick = delSel; $('bDesel').onclick = () => select(null)
 function applyScale(it, s, presetName) {
   const base = it.group.position.y; setScale(it, s); it.preset = presetName
   for (const o of descendants(it)) { o.parent = null; o.group.position.y += 5; drop(o) }
-  it.group.position.y = base; refreshSel()
+  it.group.position.y = base; resolve(it); refreshSel()
 }
 $('scale').oninput = e => { if (sel) applyScale(sel, +e.target.value, null) }
 $('bPreset').onclick = () => {
@@ -333,99 +506,209 @@ $('bPreset').onclick = () => {
   const ratio = sel.scale, ex = presets.find(p => p.name === name); if (ex) ex.ratio = ratio; else presets.push({ name, ratio })
   if (!sel.allowed.includes(name)) sel.allowed.push(name); sel.preset = name; refreshSel(); toast(`Preset "${name}" saved`)
 }
+for (const [id, k, f] of [['lColor', 'color', v => v], ['lInt', 'intensity', v => Math.max(0, Math.min(50, +v))], ['lDist', 'distance', v => Math.max(0, Math.min(30, +v))], ['lAng', 'angle', v => Math.max(1, Math.min(89, +v))]])
+  $(id).oninput = e => { if (sel?.light) { sel.light[k] = f(e.target.value); applyLight(sel) } }
+$('lKind').onchange = e => { if (!sel?.light) return; const t = e.target.value === 'spot' ? 'core:light-spot' : 'core:light-point'
+  sel.type = t; sel.light.kind = e.target.value; sel.group.clear(); def(t).build(sel.group); applyLight(sel); refreshSel() }
+function onWhat(it) {
+  if (it.pending) return 'not placed yet — tap a wall (ghost preview)'
+  if (it.wall) return `${it.face || ''} wall`
+  if (isLight(it)) return 'free-floating light'
+  return it.parent ? def(items.find(o => o.id === it.parent)?.type)?.name ?? 'floor' : 'floor'
+}
 function refreshSel() {
   $('sel').classList.toggle('hidden', !sel); if (!sel) return
   if (helper) helper.update()
-  const def = CATALOG[sel.type], p = sel.group.position
-  $('selName').textContent = def.name + ' #' + sel.id; $('bMove').classList.toggle('on', placing)
-  document.querySelectorAll('.wallonly').forEach(b => b.style.display = sel.wall ? '' : 'none')
+  const d = def(sel.type), p = sel.group.position
+  $('selName').textContent = d.name + ' #' + sel.id; $('bMove').classList.toggle('on', placing)
+  document.querySelectorAll('.wallonly').forEach(b => b.style.display = sel.wall || isLight(sel) ? '' : 'none')
+  $('lightRow').classList.toggle('hidden', !sel.light)
+  if (sel.light) { $('lKind').value = sel.light.kind; $('lColor').value = sel.light.color; $('lInt').value = sel.light.intensity; $('lDist').value = sel.light.distance; $('lAng').value = sel.light.angle; $('lAng').disabled = sel.light.kind !== 'spot' }
   $('scale').value = sel.scale; $('scaleVal').textContent = sel.scale === 1 ? '1:1' : '1:' + (1 / sel.scale).toFixed(1).replace(/\.0$/, '')
-  const box = $('presets'); box.innerHTML = ''
+  const bx = $('presets'); bx.innerHTML = ''
   const real = document.createElement('button'); real.textContent = 'Real size'; real.classList.toggle('on', !sel.preset && sel.scale === 1)
-  real.onclick = () => applyScale(sel, 1, null); box.appendChild(real)
+  real.onclick = () => applyScale(sel, 1, null); bx.appendChild(real)
   for (const pr of presets) {
     const ok = sel.allowed.includes(pr.name), b = document.createElement('button')
     b.textContent = `${pr.name} 1:${+(1 / pr.ratio).toFixed(1)}`; b.classList.toggle('on', sel.preset === pr.name); b.disabled = !ok
-    b.onclick = () => applyScale(sel, pr.ratio, pr.name); box.appendChild(b)
+    b.onclick = () => applyScale(sel, pr.ratio, pr.name); bx.appendChild(b)
     const a = document.createElement('label'); a.className = 'small'
     a.innerHTML = `<input type="checkbox" ${ok ? 'checked' : ''}> allow`
     a.firstChild.onchange = e => { sel.allowed = e.target.checked ? [...sel.allowed, pr.name] : sel.allowed.filter(n => n !== pr.name); refreshSel() }
-    box.appendChild(a)
+    bx.appendChild(a)
   }
-  const sz = def.size, s = sel.scale
-  $('selInfo').textContent = `pos ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)} m · rot ${Math.round(sel.group.rotation.y / DEG)}° · ` +
-    (sz[0] ? `${(sz[0] * s).toFixed(2)}×${(sz[2] * s).toFixed(2)} m, ${(sz[1] * s).toFixed(2)} m tall` : `${(sz[1] * s).toFixed(2)} m tall`) +
-    ` · on ${sel.wall ? 'wall' : sel.parent ? CATALOG[items.find(o => o.id === sel.parent)?.type]?.name ?? 'floor' : 'floor'}`
+  const sz = d.size, s = sel.scale
+  $('selInfo').textContent = `${sel.type} · pos ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)} m · rot ${Math.round(sel.group.rotation.y / DEG)}° · ` +
+    `${(sz[0] * s).toFixed(2)}×${(sz[2] * s).toFixed(2)} m, ${(sz[1] * s).toFixed(2)} m tall · ${sel.pending ? "" : "on "}${onWhat(sel)}`
 }
-$('paint').oninput = e => wallMat.color.set(e.target.value)
+$('paint').oninput = e => { wallMat.color.set(e.target.value); buildSurfaces() }
 
-// ---------- save / load ----------
-const LS = 'mysbase.room.v1'
-function serialize() {
-  return { version: 1, room: { ...ROOM, door: DOOR }, wallPaint: '#' + wallMat.color.getHexString(), presets,
-    items: items.map(it => ({ id: it.id, type: it.type, pos: it.group.position.toArray().map(v => +v.toFixed(2)),
-      rotY: Math.round(it.group.rotation.y / DEG), preset: it.preset, scale: +it.scale.toFixed(4), parent: it.parent, wall: it.wall, allowed: it.allowed })) }
+// ---------- surfaces UI ----------
+let sfStep = 0.001
+function layerOptions(cat) {
+  const o = [['', '— none —']]
+  for (const [k, L] of Object.entries(LAYERS)) if (L.categories.includes(cat)) o.push([k, L.name])
+  for (const m of assetMetas()) if (m.category === cat || (m.category?.endsWith('-layer') && cat.endsWith('-layer'))) o.push(['asset:' + m.id, '⬆ ' + m.name + (m.category !== cat ? ` (${m.category})` : '')])
+  return o
 }
-function deserialize(j) {
-  select(null); for (const it of items) scene.remove(it.group); items = []; nextId = 1
-  presets = j.presets?.length ? j.presets : presets
+function surfaceUI() {
+  const face = $('sfFace').value, box = $('sfLayers'); box.innerHTML = ''
+  const isOv = WALL_FACES.includes(face), arr = face === 'walls' ? surfaces.walls : isOv ? surfaces.overrides[face] : surfaces[face]
+  if (isOv && !arr) {
+    const r = document.createElement('div'); r.className = 'row small'; r.textContent = `The ${face} wall uses the "all walls" layers. `
+    const b = document.createElement('button'); b.textContent = 'Override this wall'; b.onclick = () => { surfaces.overrides[face] = structuredClone(surfaces.walls); applySurfaces() }
+    r.appendChild(b); box.appendChild(r); return
+  }
+  const cat = catFor(face === 'walls' ? 'north' : face)
+  arr.forEach((L, i) => {
+    const r = document.createElement('div'); r.className = 'row'
+    r.innerHTML = `<span>Layer ${i + 1}</span><select></select><button>−</button><input type="number" step="0.1" min="0" max="5" style="width:58px"><span class="small">cm</span><button>+</button><span class="small">tile×</span><input type="number" step="0.05" min="0.05" max="20" style="width:58px">`
+    const [sl, minus, off, plus, uv] = [r.querySelector('select'), ...r.querySelectorAll('button, input')].filter((_, k, a) => true).slice(0, 5)
+    sl.innerHTML = layerOptions(cat).map(([v, t]) => `<option value="${v}">${t}</option>`).join(''); sl.value = L?.asset || ''
+    if (L && ![...sl.options].some(o => o.value === L.asset)) { sl.add(new Option(L.asset + ' (sign in to load)', L.asset)); sl.value = L.asset }
+    off.value = L ? +(L.offsetM * 100).toFixed(1) : 0; uv.value = L ? L.uvScale[0] : 1; for (const e of [minus, off, plus, uv]) e.disabled = !L
+    const set = fn => { const l = arr[i]; if (l) { fn(l); applySurfaces(false) } }
+    sl.onchange = () => { arr[i] = sl.value ? { ...(arr[i] || layer(sl.value)), asset: sl.value } : null; applySurfaces() }
+    const bump = s => set(l => { l.offsetM = Math.max(0, Math.min(MAX_OFFSET, r3(l.offsetM + s))); off.value = +(l.offsetM * 100).toFixed(1) })
+    minus.onclick = () => bump(-sfStep); plus.onclick = () => bump(sfStep)
+    off.onchange = () => set(l => { l.offsetM = Math.max(0, Math.min(MAX_OFFSET, r3(+off.value / 100))); off.value = +(l.offsetM * 100).toFixed(1) })
+    uv.onchange = () => set(l => { const v = Math.max(0.05, Math.min(20, +uv.value || 1)); l.uvScale = [v, v] })
+    box.appendChild(r)
+  })
+  if (isOv) { const b = document.createElement('button'); b.textContent = `Clear ${face} override`; b.onclick = () => { delete surfaces.overrides[face]; applySurfaces() }; box.appendChild(b) }
+  const info = document.createElement('div'); info.className = 'small'
+  info.textContent = `Outermost surface depth (m): ` + Object.entries(outer).map(([k, v]) => `${k} ${v.toFixed(3)}`).join(' · '); box.appendChild(info)
+}
+function applySurfaces(redraw = true) { buildSurfaces(); reflow(); if (redraw) surfaceUI(); else { const i = $('sfLayers').querySelector('.small:last-child'); if (i) i.textContent = `Outermost surface depth (m): ` + Object.entries(outer).map(([k, v]) => `${k} ${v.toFixed(3)}`).join(' · ') } }
+$('sfFace').onchange = surfaceUI
+document.querySelectorAll('.sfstep').forEach(b => b.onclick = () => { sfStep = +b.dataset.s; document.querySelectorAll('.sfstep').forEach(o => o.classList.toggle('on', o === b)) })
+
+// ---------- layout JSON v2 ----------
+const LS = 'mysbase.room.v2', LS1 = 'mysbase.room.v1'
+const v3 = v => v.toArray().map(n => +n.toFixed(3))
+function serialize() {
+  const real = items.filter(it => !it.pending)
+  const base = it => ({ id: it.id, typeId: it.type, assetId: it.type.startsWith('asset:') ? it.type.slice(6) : null, name: def(it.type).name, category: def(it.type).category || 'prop',
+    pos: v3(it.group.position), rotY: Math.round(it.group.rotation.y / DEG), scale: +it.scale.toFixed(4), preset: it.preset ?? null, parent: it.parent ?? null,
+    wall: !!it.wall, face: it.face ?? null, allowed: [...it.allowed] })
+  return { version: 2, room: { ...ROOM, door: { ...DOOR }, units: 'm' }, ambience: { ...ambience }, surfaces: structuredClone(surfaces),
+    wallPaint: '#' + wallMat.color.getHexString(), presets: structuredClone(presets),
+    lights: real.filter(isLight).map(it => ({ ...base(it), kind: it.light.kind, color: it.light.color, intensity: it.light.intensity, distance: it.light.distance, angle: it.light.angle, penumbra: it.light.penumbra })),
+    items: real.filter(it => !isLight(it)).map(base) }
+}
+function migrate(j) {
+  if (j?.version === 2) return j
+  const its = (j?.items || []).map(d => ({ ...d, typeId: String(d.typeId || d.type).includes(':') ? (d.typeId || d.type) : 'core:' + d.type, face: d.face ?? (d.wall ? guessFace(d.pos) : null) }))
+  its.push({ id: 900, typeId: 'core:window', pos: [-W / 2 + 0.02, 1.0, -0.8], rotY: 90, wall: true, face: 'west' })
+  return { version: 2, room: j?.room, surfaces: DEFAULT_SURFACES(), wallPaint: j?.wallPaint, presets: j?.presets, lights: [], items: its }
+}
+function guessFace(p) { if (!p) return 'north'; const [x, , z] = p, c = [[Math.abs(z + D / 2), 'north'], [Math.abs(z - D / 2), 'south'], [Math.abs(x + W / 2), 'west'], [Math.abs(x - W / 2), 'east']]; return c.sort((a, b) => a[0] - b[0])[0][1] }
+function deserialize(raw) {
+  const j = migrate(raw)
+  if (sel) { sel.pending = false; } select(null); for (const it of items) scene.remove(it.group); items = []; nextId = 1
+  presets = j.presets?.length ? j.presets : [{ name: 'Tabletop', ratio: 0.1 }]
   wallMat.color.set(j.wallPaint || '#d9cfc0'); $('paint').value = '#' + wallMat.color.getHexString()
-  for (const d of j.items || []) {
-    if (!CATALOG[d.type] && String(d.type).startsWith('asset:')) CATALOG[d.type] = assetType(d.type)
-    if (!CATALOG[d.type]) continue
-    const it = addItem(d.type, { id: d.id, allowed: d.allowed || [] })
+  applyAmbience(j.ambience); surfaces = normSurfaces(j.surfaces); buildSurfaces()
+  let skipped = 0
+  const all = [...(j.items || []), ...(j.lights || []).map(l => ({ ...l, typeId: l.typeId || (l.kind === 'spot' ? 'core:light-spot' : 'core:light-point') }))]
+  for (const d of all) {
+    const t = d.typeId || d.type; if (!def(t)) continue
+    const dd = def(t); if ((dd.light || dd.lights) && lightCount() + (dd.lights || 1) > MAX_LIGHTS) { skipped++; continue }
+    const it = addItem(t, { id: d.id, allowed: d.allowed || [...(dd.presets || [])], light: dd.light ? { kind: d.kind || dd.light, color: d.color || '#ffe8c4', intensity: d.intensity ?? 3, distance: d.distance ?? 6, angle: d.angle ?? 45, penumbra: d.penumbra ?? 0.4 } : undefined })
     const pr = d.preset && presets.find(p => p.name === d.preset)
     setScale(it, pr ? pr.ratio : d.scale || 1); it.preset = pr ? d.preset : null
-    it.group.position.fromArray(d.pos); it.group.rotation.y = (d.rotY || 0) * DEG; it.parent = d.parent ?? null; it.wall = !!d.wall
+    it.group.position.fromArray(d.pos || [0, 0, 0]); it.group.rotation.y = (d.rotY || 0) * DEG; it.parent = d.parent ?? null; it.wall = !!d.wall; it.face = d.face || (d.wall ? guessFace(d.pos) : null)
+    if (it.light) applyLight(it)
   }
+  reflow(); surfaceUI()
+  if (skipped) toast(`Skipped ${skipped} light(s): max ${MAX_LIGHTS}`)
+  return j
 }
-$('bSave').onclick = () => { localStorage.setItem(LS, JSON.stringify(serialize())); toast('Room saved on this device') }
-$('bLoad').onclick = () => { const s = localStorage.getItem(LS); if (!s) return toast('Nothing saved yet'); deserialize(JSON.parse(s)); toast('Room loaded') }
-$('bExport').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(serialize(), null, 2)], { type: 'application/json' })); a.download = 'mysbase-room.json'; a.click() }
+function registry() {
+  const out = { version: 1, units: 'm', pivot: 'base centre (y=0 at bottom); front faces +z; wall-mounts hang with +z out of the wall', generatedAt: new Date().toISOString(), types: [], layers: [] }
+  for (const [k, d] of Object.entries(CATALOG)) if (!k.startsWith('asset:')) out.types.push({ typeId: k, name: d.name, category: d.category, boundsM: d.size, holds: !!d.holds, wallOnly: !!d.wallOnly, source: 'builtin' })
+  for (const [k, L] of Object.entries(LAYERS)) out.layers.push({ asset: k, name: L.name, categories: L.categories, tileM: L.tileM, source: 'builtin' })
+  for (const m of assetMetas()) {
+    const e = { typeId: 'asset:' + m.id, assetId: m.id, name: m.name, category: m.category || (m.wall ? 'wall-mount' : 'prop'), boundsM: m.sizeM || null, holds: !!m.holds, wallOnly: !!m.wall, kind: m.kind, needsConverter: !!m.needsConverter, source: 'upload' }
+    if (e.category.endsWith('-layer')) out.layers.push({ asset: e.typeId, assetId: m.id, name: m.name, categories: [e.category], tileM: m.sizeM?.slice(0, 2) || null, kind: m.kind, source: 'upload' }); else out.types.push(e)
+  }
+  return out
+}
+const pretty = o => JSON.stringify(o, null, 2)
+function download(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000) }
+async function copy(text, what) {
+  $('ioText').value = text
+  try { await navigator.clipboard.writeText(text); toast(`✅ ${what} copied to the clipboard`) } catch { $('ioText').select(); toast(`${what} is in the box below — select all and copy`) }
+}
+$('bSave').onclick = () => { localStorage.setItem(LS, JSON.stringify(serialize())); toast('✅ Room saved on this device') }
+$('bLoad').onclick = () => { const s = localStorage.getItem(LS) || localStorage.getItem(LS1); if (!s) return toast('Nothing saved yet'); deserialize(JSON.parse(s)); toast('Room loaded') }
+$('bExport').onclick = () => { const j = serialize(), t = pretty(j); download('mysbase-room.json', t); $('ioText').value = t; openSection('ioSec'); toast(`✅ Exported mysbase-room.json · v2 · ${j.items.length} items, ${j.lights.length} lights`, 3200) }
+$('bCopy').onclick = () => copy(pretty(serialize()), 'Room JSON')
+$('bPaste').onclick = () => {
+  const t = $('ioText').value.trim(); if (!t) return toast('Paste a room JSON into the box first')
+  try { const j = JSON.parse(t); if (!j || typeof j !== 'object' || (!j.items && !j.surfaces)) throw 0; const m = deserialize(j); toast(`✅ Imported (${j.version === 2 ? 'v2' : 'v1 → migrated to v2'}) · ${m.items.length} items`) } catch { toast('❌ That text is not a room layout JSON') }
+}
 $('bImport').onclick = () => $('file').click()
-$('file').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { deserialize(JSON.parse(await f.text())); toast('Room imported') } catch { toast('That file is not a room layout') } e.target.value = '' }
+$('file').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const j = JSON.parse(await f.text()); deserialize(j); toast(`✅ Imported ${f.name}`) } catch { toast('❌ That file is not a room layout') } e.target.value = '' }
+$('bReg').onclick = () => { const t = pretty(registry()); download('mysbase-registry.json', t); $('ioText').value = t; toast('✅ Exported mysbase-registry.json') }
+$('bRegCopy').onclick = () => copy(pretty(registry()), 'Registry JSON')
 $('bClear').onclick = () => { if (confirm('Reset to the starter room? (Saved copy is kept until you Save again)')) starter() }
+function openSection(id) { $(id).open = true; setDevMin(false); if (!dev) toggleDev() }
 function starter() {
-  deserialize({ wallPaint: '#d9cfc0', items: [
-    { id: 1, type: 'bed', pos: [-1.6, 0, -1.9], rotY: 0 },
-    { id: 2, type: 'desk', pos: [1.75, 0, -2.6], rotY: 0 },
-    { id: 3, type: 'bookshelf', pos: [2.3, 0, -0.6], rotY: -90 },
-    { id: 4, type: 'ent', pos: [-2.2, 0, 1.4], rotY: 90 },
-    { id: 5, type: 'tv', pos: [-2.2, 0.6, 1.4], rotY: 90, parent: 4 },
-    { id: 6, type: 'painting', pos: [0, 1.15, -2.98], rotY: 0, wall: true },
-    { id: 7, type: 'rock', pos: [0.2, 0, -0.4], rotY: 160, allowed: ['Tabletop'] },
-    { id: 8, type: 'figure', pos: [1.75, 0.75, -2.6], rotY: 20, preset: 'Tabletop', allowed: ['Tabletop'], parent: 2 },
+  deserialize({ version: 2, wallPaint: '#d9cfc0', surfaces: DEFAULT_SURFACES(), items: [
+    { id: 1, typeId: 'core:bed', pos: [-1.6, 0, -1.9], rotY: 0 },
+    { id: 2, typeId: 'core:desk', pos: [1.75, 0, -2.6], rotY: 0 },
+    { id: 3, typeId: 'core:bookshelf', pos: [2.3, 0, -0.6], rotY: -90 },
+    { id: 4, typeId: 'core:ent', pos: [-2.2, 0, 1.4], rotY: 90 },
+    { id: 5, typeId: 'core:tv', pos: [-2.2, 0.6, 1.4], rotY: 90, parent: 4 },
+    { id: 6, typeId: 'core:painting', pos: [0, 1.15, -2.98], rotY: 0, wall: true, face: 'north' },
+    { id: 7, typeId: 'core:rock', pos: [0.2, 0, -0.4], rotY: 160, allowed: ['Tabletop'] },
+    { id: 8, typeId: 'core:figure', pos: [1.75, 0.75, -2.6], rotY: 20, preset: 'Tabletop', allowed: ['Tabletop'], parent: 2 },
+    { id: 9, typeId: 'core:window', pos: [-2.48, 1.05, -0.8], rotY: 90, wall: true, face: 'west' },
   ] })
+  $('roomSel').value = 'starter'
 }
+async function loadPreset(name) {
+  if (name === 'starter') { starter(); history.replaceState(null, '', location.pathname); return }
+  try { const r = await fetch(`/rooms/${encodeURIComponent(name)}.json`); if (!r.ok) throw 0; deserialize(await r.json()); $('roomSel').value = name
+    const u = new URLSearchParams(location.search); u.set('room', name); history.replaceState(null, '', '?' + u); toast(`Room "${name}" loaded`) } catch { toast(`No built-in room "${name}"`) }
+}
+$('roomSel').onchange = e => loadPreset(e.target.value)
 
 // ---------- boot ----------
 new GLTFLoader().load('/assets/rock1-clay.glb', g => {
-  const m = g.scene, b = new THREE.Box3().setFromObject(m), sz = b.getSize(new THREE.Vector3())
-  m.scale.setScalar(2.08 / sz.y); const b2 = new THREE.Box3().setFromObject(m), c = b2.getCenter(new THREE.Vector3())
-  m.position.set(-c.x, -b2.min.y, -c.z)
+  const m = g.scene, b = new THREE.Box3().setFromObject(m), sz = b.getSize(V())
+  m.scale.setScalar(2.08 / sz.y); const b2 = new THREE.Box3().setFromObject(m), c = b2.getCenter(V()), s2 = b2.getSize(V())
+  m.position.set(-c.x, -b2.min.y, -c.z); CATALOG['core:rock'].size = [+s2.x.toFixed(3), 2.08, +s2.z.toFixed(3)]
   m.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true; o.frustumCulled = false } })
   rockTemplate = new THREE.Group(); rockTemplate.add(m)
-  for (const it of items) if (it.type === 'rock') { it.group.clear(); it.group.add(rockTemplate.clone(true)) }
+  for (const it of items) if (it.type === 'core:rock') { it.group.clear(); it.group.add(rockTemplate.clone(true)) }
+  for (const it of items) resolve(it)
 }, undefined, () => toast('Rock model failed to load'))
 initCloud({
   toast, spawn, serialize, deserialize,
   registerType(t) { CATALOG[t] = assetType(t) },
   refreshType(t) {
     CATALOG[t] = assetType(t)
-    for (const it of items) if (it.type === t) { it.group.clear(); CATALOG[t].build(it.group); it.group.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true }) }
+    for (const it of items) if (it.type === t) { const gh = it.pending; it.group.clear(); CATALOG[t].build(it.group); it.group.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true }); if (gh) setGhost(it, true) }
     if (sel) refreshSel()
   },
   rebuildAssets() { for (const t of new Set(items.map(i => i.type))) if (t.startsWith('asset:')) this.refreshType(t) },
+  assetsChanged() { buildSurfaces(); reflow(); surfaceUI() },
 })
-const saved = localStorage.getItem(LS)
-if (saved) { try { deserialize(JSON.parse(saved)) } catch { starter() } } else starter()
-if (new URLSearchParams(location.search).has('third')) toggleView()
-if (new URLSearchParams(location.search).has('dev')) toggleDev()
+applyAmbience()
+const qs = new URLSearchParams(location.search)
+if (qs.get('room')) { starter(); loadPreset(qs.get('room')) }
+else { const saved = localStorage.getItem(LS) || localStorage.getItem(LS1); if (saved) { try { deserialize(JSON.parse(saved)) } catch { starter() } } else starter() }
+if (qs.has('third')) toggleView()
+if (qs.has('dev')) toggleDev()
+if (qs.has('help')) toggleHelp(true)
 
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix() }
-function fitPanels() { const t = $('top').getBoundingClientRect().bottom + 6 + 'px'; $('dev').style.top = t; $('help').style.top = t; $('dev').style.maxHeight = `calc(100% - ${t} - 180px)` }
+function fitPanels() { const t = $('top').getBoundingClientRect().bottom + 6; $('dev').style.top = t + 'px'; $('help').style.top = t + 'px'; $('dev').style.maxHeight = `calc(100% - ${t}px - ${touch ? 170 : 16}px)`; $('help').style.maxHeight = `calc(100% - ${t}px - ${touch ? 170 : 16}px)` }
 addEventListener('resize', () => { resize(); fitPanels() }); resize(); fitPanels()
 const clock = new THREE.Clock()
+const ghostRay = () => locked() || touch || !aim ? [innerWidth / 2, innerHeight / 2] : [aim.x, aim.y]
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05)
   let fx = moveIn.x, fz = -moveIn.y
@@ -433,10 +716,11 @@ renderer.setAnimationLoop(() => {
   if (keys.KeyA || keys.ArrowLeft) fx -= 1; if (keys.KeyD || keys.ArrowRight) fx += 1
   const sp = (keys.ShiftLeft ? 3.2 : 1.6) * dt, sy = Math.sin(player.yaw), cy = Math.cos(player.yaw)
   player.pos.x += (sy * fz - cy * fx) * sp; player.pos.z += (cy * fz + sy * fx) * sp
-  player.pos.x = Math.max(-W / 2 + AVATAR.r, Math.min(W / 2 - AVATAR.r, player.pos.x))
-  player.pos.z = Math.max(-D / 2 + AVATAR.r, Math.min(D / 2 - AVATAR.r, player.pos.z))
+  collideAvatar()
   look(lookIn.x * 900 * dt, lookIn.y * 600 * dt)
+  updateCamera()
+  if (sel?.pending) { const h = castFrom(...ghostRay(), walls)[0]; if (h) placeAt(sel, h, true) }
   if (helper) helper.update()
-  updateCamera(); renderer.render(scene, camera)
+  renderer.render(scene, camera)
 })
-window.__mysbase = { serialize, items: () => items }
+window.__mysbase = { serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
