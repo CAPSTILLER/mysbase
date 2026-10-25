@@ -61,11 +61,11 @@
   </details>
   <details><summary>My assets (private)</summary>
     <div id="cloud" class="hidden">
-      <div class="row"><span>Assets</span><button id="bSignIn">Sign in</button><button id="bAssets">My assets</button><button id="bUpload">Upload…</button>
+      <div class="row"><span>Assets</span><button id="bSignIn">Sign in</button><button id="bAssets">My assets</button><button id="bUpload">Upload…</button><button id="bZip">Upload zip…</button><input type="file" id="zipFile" hidden accept=".zip,application/zip">
         <input type="file" id="assetFile" hidden accept=".glb,.gltf,.obj,.stl,.ply,.fbx,.usdz,.png,.jpg,.jpeg,.webp">
         <progress id="assetProg" class="hidden" max="100" value="0"></progress><span id="assetProgT" class="small"></span></div>
       <div id="assetForm" class="hidden"></div>
-      <div id="assetList"></div>
+      <div id="assetMgr" class="hidden"></div><div id="zipLog" class="hidden"></div><div id="assetList"></div>
     </div>
     <div class="row small">Private uploads + server rooms: CAPs Mind key holders only. Connecting is read-only.</div>
   </details>

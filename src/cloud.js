@@ -10,6 +10,7 @@ import { USDZLoader } from 'three/examples/jsm/loaders/USDZLoader.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { uploadPresigned } from '@vercel/blob/client'
 import { getAddress } from 'viem'
+import { unzipSync } from 'fflate'
 
 export const API = (import.meta.env.VITE_MYSBASE_API || 'https://mywally.gearup.wtf').replace(/\/$/, '')
 const MAX = 100 * 1024 * 1024
@@ -153,37 +154,218 @@ export async function ensureAssets(layout) {
   return refreshAssets()
 }
 function refreshAssets() { return assetsP || (assetsP = refreshAssets0().finally(() => { assetsP = null })) }
+let folders = [], view = localStorage.getItem('mysbase.assetView') || 'grid'
+const filt = { q: '', cat: '', folder: '*' }
 async function refreshAssets0() {
-  const box = $('assetList'); box.textContent = 'Loading…'
+  const box = $('assetList'); if (!metas.size) box.textContent = 'Loading…'
   try {
-    const { assets } = await call('mysbase-assets')
+    const r = await call('mysbase-assets'), assets = r.assets || []
+    folders = r.folders || [...new Set(assets.map(a => a.folder).filter(Boolean))].sort()
     metas.clear(); for (const a of assets) metas.set(a.id, a)
-    for (const a of assets) app.registerType('asset:' + a.id)
-    box.innerHTML = assets.length ? '' : '<span class="small">No assets yet.</span>'
-    for (const a of assets) {
-      const row = document.createElement('div'); row.className = 'row'
-      const mb = ((a.model?.bytes || a.original.bytes) / 1048576).toFixed(1)
-      const sz = a.sizeM ? a.sizeM.map(v => v.toFixed(2)).join('×') + ' m' : ''
-      row.innerHTML = `<b></b><span class="small">${a.kind} · ${a.sourceFormat} · ${mb} MB · ${sz}${a.needsConverter ? ' · needs converter' : ''}</span>`
-      row.firstChild.textContent = a.name
-      const place = document.createElement('button'); place.textContent = 'Place'; place.disabled = !!a.needsConverter && a.kind !== 'image'
-      place.onclick = () => { app.spawn('asset:' + a.id); loadTemplate(a).catch(err) }
-      const del = document.createElement('button'); del.textContent = 'Delete'
-      del.onclick = async () => { if (!confirm(`Delete "${a.name}" from the server? Rooms using it will show a placeholder.`)) return; try { await call('mysbase-asset-delete', { id: a.id }); app.toast('Deleted'); refreshAssets() } catch (e) { err(e) } }
-      const cat = document.createElement('select'); cat.innerHTML = opts(CATS, a.category || (a.wall ? 'wall-mount' : 'prop'), CAT_LABEL); cat.title = 'Category'
-      const sn = document.createElement('select'); sn.innerHTML = opts(SNAPS, a.snap || 'auto'); sn.title = 'Snap side (which side locks flush to the wall / table / ceiling)'
-      const saveMeta = async () => {
-        try { const r = await call('mysbase-asset-meta', { id: a.id, category: cat.value, snap: sn.value }); Object.assign(a, r.asset || { category: cat.value, snap: sn.value }); metas.set(a.id, a); app.refreshType('asset:' + a.id); app.assetsChanged?.(); app.toast(`✅ ${a.name}: ${cat.value} · snap ${snapOfMeta(a)}`) }
-        catch (e) { err(e); cat.value = a.category || 'prop'; sn.value = a.snap || 'auto' }
-      }
-      cat.onchange = saveMeta; sn.onchange = saveMeta
-      const meta = document.createElement('span'); meta.className = 'small'; meta.textContent = 'Category'
-      const meta2 = document.createElement('span'); meta2.className = 'small'; meta2.textContent = 'Snap'
-      row.append(place, del, meta, cat, meta2, sn); box.appendChild(row)
-    }
+    for (const a of assets) if (a.kind !== 'archive') app.registerType('asset:' + a.id)
+    renderAssets()
     app.rebuildAssets(); app.assetsChanged?.()
     return true
   } catch (e) { box.textContent = ''; err(e); return false }
+}
+/** Round-3 lookup: an asset by name (case/extension-insensitive), preferring the given folder. */
+export function findAsset(name, folder) {
+  const k = s => String(s || '').toLowerCase().replace(/\.[a-z0-9]{2,5}$/, '').trim()
+  const all = [...metas.values()].filter(m => m.kind !== 'archive' && k(m.name) === k(name))
+  return (folder != null && all.find(m => (m.folder || '') === folder)) || all[0] || null
+}
+export const allAssets = () => [...metas.values()]
+// ---------- asset manager (folders, grid/list, rename, category/snap, move, search) ----------
+function mgrBar() {
+  const m = $('assetMgr'); m.classList.remove('hidden')
+  m.innerHTML = `<div class="row"><input type="search" id="amQ" placeholder="Search name…"><select id="amCat" title="Filter by category"></select></div>
+    <div class="row"><select id="amFolder" title="Folder"></select><button id="amNew" title="New folder">+ Folder</button><button id="amRen">Rename folder</button><button id="amDel">Delete folder</button>
+    <button id="amView" title="Grid / list">${view === 'grid' ? '☰ List' : '▦ Grid'}</button></div>`
+  const q = $('amQ'); q.value = filt.q; q.oninput = () => { filt.q = q.value; renderAssets(false) }
+  $('amCat').innerHTML = `<option value="">All categories</option>${opts(CATS, filt.cat, CAT_LABEL)}`; $('amCat').onchange = e => { filt.cat = e.target.value; renderAssets(false) }
+  $('amFolder').innerHTML = `<option value="*">All folders</option><option value="">Unfiled</option>` + folders.map(f => `<option>${esc(f)}</option>`).join('')
+  $('amFolder').value = filt.folder; $('amFolder').onchange = e => { filt.folder = e.target.value; renderAssets() }
+  const realF = filt.folder !== '*' && filt.folder !== ''
+  $('amRen').disabled = $('amDel').disabled = !realF
+  $('amView').onclick = () => { view = view === 'grid' ? 'list' : 'grid'; localStorage.setItem('mysbase.assetView', view); renderAssets() }
+  $('amNew').onclick = () => folderAct('create')
+  $('amRen').onclick = () => folderAct('rename'); $('amDel').onclick = () => folderAct('delete')
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const okFolder = f => /^[\w .()&+,'-]{1,60}$/.test(f)
+async function folderAct(op) {
+  try {
+    if (op === 'create') {
+      const n = (prompt('New folder name') || '').trim(); if (!n) return
+      if (!okFolder(n)) return app.toast('Folder: letters, digits, spaces, - _ . ( ) & + , only')
+      await call('mysbase-folder', { op, name: n }); filt.folder = n
+    } else if (op === 'rename') {
+      const to = (prompt(`Rename folder "${filt.folder}" to`, filt.folder) || '').trim(); if (!to || to === filt.folder) return
+      if (!okFolder(to)) return app.toast('Folder: letters, digits, spaces, - _ . ( ) & + , only')
+      await call('mysbase-folder', { op, name: filt.folder, to }); filt.folder = to
+    } else {
+      if (!confirm(`Delete folder "${filt.folder}"? Its assets are kept and become Unfiled.`)) return
+      await call('mysbase-folder', { op, name: filt.folder }); filt.folder = '*'
+    }
+    app.toast('✅ Folders updated'); await refreshAssets()
+  } catch (e) { err(e) }
+}
+const thumbs = new Map() // id -> url (signed or data:)
+function shown() {
+  const q = filt.q.toLowerCase()
+  return [...metas.values()].filter(a => (filt.folder === '*' || (a.folder || '') === filt.folder) && (!filt.cat || (a.category || (a.wall ? 'wall-mount' : 'prop')) === filt.cat) && (!q || a.name.toLowerCase().includes(q) || (a.folder || '').toLowerCase().includes(q)))
+}
+function renderAssets(bar = true) {
+  if (bar || !$('amQ')) mgrBar()
+  const box = $('assetList'); box.className = view; box.innerHTML = ''
+  const list = shown()
+  if (!list.length) { box.innerHTML = `<span class="small">${metas.size ? 'Nothing matches.' : 'No assets yet. Upload a file or a zip.'}</span>`; return }
+  const groups = new Map(); for (const a of list) { const f = a.folder || ''; if (!groups.has(f)) groups.set(f, []); groups.get(f).push(a) }
+  for (const f of [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b))) {
+    if (filt.folder === '*') { const h = document.createElement('div'); h.className = 'fhead'; h.textContent = '📁 ' + (f || 'Unfiled') + ` (${groups.get(f).length})`; box.appendChild(h) }
+    for (const a of groups.get(f).sort((x, y) => (x.kind === 'archive') - (y.kind === 'archive') || x.name.localeCompare(y.name))) box.appendChild(card(a))
+  }
+}
+function card(a) {
+  const c = document.createElement('div'); c.className = 'card'; c.dataset.id = a.id
+  const im = document.createElement(a.kind === 'archive' ? 'div' : 'img'); im.className = a.kind === 'archive' ? 'noimg' : ''
+  if (a.kind === 'archive') im.textContent = '🗜 original zip'; else { im.alt = a.name; im.loading = 'lazy'; thumbFor(a).then(u => { if (u) im.src = u; else { const d = document.createElement('div'); d.className = 'noimg'; d.textContent = a.needsConverter ? 'needs converter' : 'no preview'; im.replaceWith(d) } }) }
+  const nm = document.createElement('b'); nm.textContent = a.name
+  const mb = (((a.model?.bytes || a.original?.bytes) || 0) / 1048576).toFixed(1)
+  const info = document.createElement('span'); info.className = 'small'
+  info.textContent = `${a.kind} · ${a.sourceFormat} · ${mb} MB${a.sizeM ? ' · ' + a.sizeM.map(v => v.toFixed(2)).join('×') + ' m' : ''}${a.needsConverter ? ' · needs converter' : ''}`
+  c.append(im, nm, info)
+  const acts = document.createElement('div'); acts.className = 'acts'
+  const btn = (t, f, tip) => { const b = document.createElement('button'); b.textContent = t; b.title = tip || t; b.onclick = f; acts.appendChild(b); return b }
+  if (a.kind !== 'archive') { const pl = btn('Place', () => { app.spawn('asset:' + a.id); loadTemplate(a).catch(err) }); pl.disabled = !!a.needsConverter && a.kind !== 'image' }
+  btn('Rename', async () => { const n = (prompt('Asset name', a.name) || '').trim(); if (!n || n === a.name) return; await saveMeta(a, { name: n }) })
+  btn('Delete', async () => { if (!confirm(`Delete "${a.name}" from the server? Rooms using it will show a placeholder.`)) return; try { await call('mysbase-asset-delete', { id: a.id }); app.toast('Deleted'); refreshAssets() } catch (e) { err(e) } })
+  c.appendChild(acts)
+  if (a.kind !== 'archive') {
+    const cat = document.createElement('select'); cat.innerHTML = opts(CATS, a.category || (a.wall ? 'wall-mount' : 'prop'), CAT_LABEL); cat.title = 'Category'; cat.className = 'amCat'
+    const sn = document.createElement('select'); sn.innerHTML = opts(SNAPS, a.snap || 'auto', { auto: `snap: auto (${defaultSnap(a.category || 'prop')})` }); sn.title = 'Snap side (which side locks flush to the wall / table / ceiling)'; sn.className = 'amSnap'
+    cat.onchange = () => saveMeta(a, { category: cat.value, snap: sn.value }, () => { cat.value = a.category || 'prop' })
+    sn.onchange = () => saveMeta(a, { category: cat.value, snap: sn.value }, () => { sn.value = a.snap || 'auto' })
+    c.append(cat, sn)
+  }
+  const fo = document.createElement('select'); fo.title = 'Move to folder'; fo.className = 'amMove'
+  fo.innerHTML = `<option value="">📁 Unfiled</option>` + folders.map(f => `<option ${f === a.folder ? 'selected' : ''}>${esc(f)}</option>`).join('')
+  fo.onchange = () => saveMeta(a, { folder: fo.value }, () => { fo.value = a.folder || '' })
+  c.appendChild(fo)
+  return c
+}
+async function saveMeta(a, patch, revert) {
+  try {
+    const r = await call('mysbase-asset-meta', { id: a.id, ...patch })
+    Object.assign(a, r.asset || patch); if (patch.folder === '') delete a.folder; metas.set(a.id, a)
+    if (a.kind !== 'archive') { app.refreshType('asset:' + a.id); app.assetsChanged?.() }
+    app.toast(`✅ ${a.name}${patch.category ? `: ${a.category} · snap ${snapOfMeta(a)}` : patch.folder !== undefined ? ` → ${a.folder || 'Unfiled'}` : ' renamed'}`)
+    renderAssets()
+  } catch (e) { err(e); revert?.() }
+}
+// thumbnails: stored thumb.png, the image itself, or rendered once from the GLB and saved back (best effort)
+let thumbQ = Promise.resolve()
+function thumbFor(a) {
+  if (thumbs.has(a.id)) return Promise.resolve(thumbs.get(a.id))
+  const p = (async () => {
+    if (a.thumb) return (await signedUrl(a.id, a.thumb.file)).url
+    if (a.kind === 'image') return (await signedUrl(a.id, a.original.file)).url
+    if (!a.model) return null
+    return (thumbQ = thumbQ.catch(() => {}).then(async () => {
+      const obj = await loadTemplate(a), blob = await snapshot(obj)
+      const url = URL.createObjectURL(blob)
+      saveThumb(a, blob).catch(e => console.warn('thumb save', e))
+      return url
+    }))
+  })().catch(e => { console.warn('thumb', e); return null })
+  p.then(u => thumbs.set(a.id, u)); return p
+}
+async function saveThumb(a, blob) {
+  const buf = await blob.arrayBuffer()
+  await put(a.id, 'thumb.png', new Blob([buf], { type: 'image/png' }), 'Thumb', () => {})
+  const r = await call('mysbase-asset-meta', { id: a.id, thumb: { file: 'thumb.png', sha256: await sha256(buf) } }); Object.assign(a, r.asset || {})
+}
+let snapR = null
+async function snapshot(obj, px = 256) {
+  if (!snapR) { snapR = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true }); snapR.setSize(px, px, false); snapR.outputColorSpace = THREE.SRGBColorSpace }
+  const sc = new THREE.Scene(); sc.add(new THREE.HemisphereLight('#ffffff', '#8a8a99', 2.2)); const dl = new THREE.DirectionalLight('#fff', 2); dl.position.set(2, 4, 3); sc.add(dl)
+  const o = obj.clone(true); sc.add(o)
+  const b = new THREE.Box3().setFromObject(o), c = b.getCenter(new THREE.Vector3()), r = Math.max(b.getSize(new THREE.Vector3()).length() / 2, 0.01)
+  const cam = new THREE.PerspectiveCamera(35, 1, r / 100, r * 100), d = r / Math.sin(17.5 * Math.PI / 180)
+  cam.position.copy(c).add(new THREE.Vector3(0.55, 0.45, 1).normalize().multiplyScalar(d)); cam.lookAt(c)
+  snapR.setClearColor('#eef0f4', 1); snapR.render(sc, cam)
+  return new Promise((res, rej) => snapR.domElement.toBlob(b => b ? res(b) : rej(new Error('snapshot failed')), 'image/png'))
+}
+// ---------- zip upload: own folder, each file through the convert/upload pipeline ----------
+const guessCat = (name, kind) => { const n = name.toLowerCase()
+  if (/(^|[_ -])(wall)([_ -]|$)/.test(n) && /pad|tile|panel|layer|paper/.test(n)) return 'wall-layer'
+  if (/floor/.test(n) && /pad|tile|plank|layer|slab/.test(n)) return 'floor-layer'
+  if (/ceiling/.test(n) && /pad|tile|layer/.test(n)) return 'ceiling-layer'
+  if (/ceiling|cage_?light|lamp|chandelier|pendant/.test(n)) return 'ceiling-mount'
+  if (kind === 'image' || /door|window|poster|decal|painting|frame|sign|shelf_wall/.test(n)) return 'wall-mount'
+  return 'prop' }
+async function pickZip(f) {
+  if (f.size > MAX) return app.toast('Max 100 MB per zip')
+  const buf = new Uint8Array(await f.arrayBuffer())
+  let files
+  try { files = unzipSync(buf) } catch (e) { return app.toast('❌ Not a readable zip: ' + (e?.message || e)) }
+  let folder = f.name.replace(/\.zip$/i, '').replace(/[^\w .()&+,'-]/g, '_').slice(0, 54) || 'zip'
+  if (folders.includes(folder)) { let i = 2; while (folders.includes(`${folder} (${i})`)) i++; folder = `${folder} (${i})` }
+  const entries = Object.entries(files).filter(([p, d]) => !p.endsWith('/') && !/(^|\/)(__MACOSX|\.)/.test(p) && d.length)
+  const log = $('zipLog'); log.classList.remove('hidden'); log.innerHTML = `<b>${esc(f.name)} → 📁 ${esc(folder)}</b> · ${entries.length} files`
+  const rows = entries.map(([p]) => { const r = document.createElement('div'); r.className = 'zr'; r.innerHTML = `<span></span><progress max="100" value="0"></progress><span class="small">waiting</span>`; r.firstChild.textContent = p; log.appendChild(r); return r })
+  const st = (r, t, cls = '') => { const s = r.lastChild; s.textContent = t; s.className = 'small ' + cls }
+  try {
+    await call('mysbase-folder', { op: 'create', name: folder }); if (!folders.includes(folder)) folders.push(folder)
+    const zid = crypto.randomUUID(); await put(zid, 'original.zip', new Blob([buf], { type: 'application/zip' }), 'Zip', pc => { log.firstChild.title = pc + '%' })
+    await call('mysbase-asset-save', { id: zid, name: f.name, kind: 'archive', sourceFormat: 'zip', folder, original: { file: 'original.zip', sha256: await sha256(buf.buffer) } })
+  } catch (e) { err(e); log.insertAdjacentHTML('beforeend', `<div class="zr"><span class="err">❌ ${esc(e?.message || e)}</span></div>`); return }
+  let ok = 0; const errs = []
+  for (let i = 0; i < entries.length; i++) {
+    const [path, data] = entries[i], r = rows[i], base = path.split('/').pop(), ext = (base.split('.').pop() || '').toLowerCase()
+    if (![...MODEL_EXT, ...IMG_EXT].includes(ext)) { st(r, 'skipped (not a model/image)', 'err'); errs.push(`${path}: skipped`); continue }
+    try {
+      st(r, 'converting…')
+      const meta = await ingest(base, ext, data.slice().buffer, folder, pc => { r.children[1].value = pc; st(r, `uploading ${Math.round(pc)}%`) })
+      await call('mysbase-asset-save', meta); r.children[1].value = 100
+      st(r, meta.needsConverter ? '⚠ stored original (needs converter)' : `✅ ${meta.category}`, meta.needsConverter ? 'err' : 'ok'); if (meta.needsConverter) errs.push(`${path}: ${meta.note}`); else ok++
+    } catch (e) { st(r, '❌ ' + (e?.message || e), 'err'); errs.push(`${path}: ${e?.message || e}`) }
+  }
+  log.insertAdjacentHTML('beforeend', `<div class="zr"><b>${ok}/${entries.length} uploaded${errs.length ? ` · ${errs.length} problem(s) listed above` : ''}</b><button id="zipX">Close</button></div>`)
+  $('zipX').onclick = () => log.classList.add('hidden')
+  app.toast(`✅ ${f.name}: ${ok} assets in 📁 ${folder}`)
+  filt.folder = folder; await refreshAssets()
+}
+/** Non-interactive version of the single-file pipeline (sane defaults: unit guess, category from name, auto snap). */
+async function ingest(fileName, ext, buf, folder, prog) {
+  const id = crypto.randomUUID(), name = fileName.replace(/\.[^.]+$/, '').slice(0, 80), origFile = 'original.' + (ext === 'jpeg' ? 'jpg' : ext)
+  if (buf.byteLength > MAX) throw new Error('over 100 MB')
+  const original = { file: origFile, sha256: await sha256(buf) }
+  if (IMG_EXT.includes(ext)) {
+    const blob = new Blob([buf], { type: 'image/' + (ext === 'jpg' ? 'jpeg' : ext) }), img = await createImageBitmap(blob), w = 0.8
+    await put(id, origFile, blob, 'Image', prog)
+    const category = guessCat(name, 'image')
+    return { id, name, folder, kind: 'image', sourceFormat: ext, original, sizeM: [w, +(w * img.height / img.width).toFixed(3), 0.02], wall: category === 'wall-mount', category, snap: 'auto' }
+  }
+  let obj = null, why = ''
+  try { obj = await parse(ext, buf.slice(0)) } catch (e) { why = e?.message || 'could not read' }
+  if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
+  if (!obj) { await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original', prog); return { id, name, folder, kind: 'model', sourceFormat: ext, original, needsConverter: true, note: (ext === 'gltf' ? 'GLTF with external files: zip a .glb instead. ' : '') + why.slice(0, 180) } }
+  const raw = measure(obj), unit = raw.y > 50 ? (raw.y > 500 ? 'mm' : 'cm') : 'm', s = UNITS[unit]
+  const root = new THREE.Group(); root.add(obj); obj.scale.multiplyScalar(s); obj.updateMatrixWorld(true)
+  const b = new THREE.Box3().setFromObject(obj), c = b.getCenter(new THREE.Vector3())
+  obj.position.set(obj.position.x - c.x, obj.position.y - b.min.y, obj.position.z - c.z); root.updateMatrixWorld(true)
+  const sz = measure(root), category = guessCat(name, 'model')
+  const meta = { id, name, folder, kind: 'model', sourceFormat: ext, original, sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit, scale: s,
+    holds: false, wall: category === 'wall-mount', allowedPresets: ['Tabletop'], category, snap: 'auto' }
+  let glb = null; try { glb = await new GLTFExporter().parseAsync(root, { binary: true }) } catch (e) { console.warn(e) }
+  await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original', p => prog(p / 2))
+  if (glb && glb.byteLength <= MAX) {
+    await put(id, 'model.glb', new Blob([glb], { type: 'model/gltf-binary' }), 'GLB', p => prog(50 + p / 2))
+    meta.model = { file: 'model.glb', sha256: await sha256(glb) }
+    try { const t = await snapshot(root), tb = await t.arrayBuffer(); await put(id, 'thumb.png', new Blob([tb], { type: 'image/png' }), 'Thumb', () => {}); meta.thumb = { file: 'thumb.png', sha256: await sha256(tb) } } catch (e) { console.warn('thumb', e) }
+  } else { meta.needsConverter = true; meta.note = glb ? 'GLB over 100 MB' : 'GLB export failed' }
+  return meta
 }
 function measure(obj) { const b = new THREE.Box3().setFromObject(obj); return b.getSize(new THREE.Vector3()) }
 async function parse(ext, buf) {
@@ -197,12 +379,13 @@ async function parse(ext, buf) {
 }
 function form(html) { const f = $('assetForm'); f.innerHTML = html; f.classList.remove('hidden'); return f }
 function closeForm() { const f = $('assetForm'); f.innerHTML = ''; f.classList.add('hidden') }
-async function put(id, file, blob, label) {
+async function put(id, file, blob, label, onProg) {
+  if (window.__mysbaseTestPut) return window.__mysbaseTestPut(id, file, blob, onProg) // Playwright hook (no real Blob in tests)
   const t = await session()
   await uploadPresigned(`mysbase/assets/${id}/${file}`, blob, {
     access: 'private', handleUploadUrl: API + '/api/rocks/mysbase-upload', headers: { 'x-mysbase-session': t },
     multipart: blob.size > 8 * 1024 * 1024, contentType: blob.type || 'application/octet-stream',
-    onUploadProgress: p => { $('assetProg').value = p.percentage; $('assetProgT').textContent = `${label} ${Math.round(p.percentage)}%` },
+    onUploadProgress: p => { if (onProg) return onProg(p.percentage); $('assetProg').value = p.percentage; $('assetProgT').textContent = `${label} ${Math.round(p.percentage)}%` },
   })
 }
 async function pick(f) {
@@ -280,6 +463,7 @@ async function run(fn) {
   try {
     const meta = await fn()
     $('assetProgT').textContent = 'Saving…'
+    if (filt.folder !== '*' && filt.folder) meta.folder = filt.folder
     await call('mysbase-asset-save', meta)
     closeForm(); $('assetProgT').textContent = '✅ Uploaded'; app.toast('Uploaded to your private storage')
     refreshAssets()
@@ -311,6 +495,8 @@ export function initCloud(hooks) {
   $('bSignIn').onclick = async () => { try { await session(); app.toast('Signed in'); refreshAssets(); listRooms() } catch (e) { err(e) } }
   $('bAssets').onclick = refreshAssets
   $('bUpload').onclick = () => $('assetFile').click()
+  $('bZip').onclick = () => $('zipFile').click()
+  $('zipFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) pickZip(f).catch(err) }
   $('assetFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) pick(f).catch(err) }
   $('bSaveSrv').onclick = saveServer
   $('bLoadSrv').onclick = () => loadServer(0)

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
-import { initCloud, assetType, assetMetas, layerSource, ensureAssets, snapOfMeta } from './cloud.js'
+import { initCloud, assetType, assetMetas, layerSource, ensureAssets, snapOfMeta, findAsset, allAssets } from './cloud.js'
 import { LAYERS, layerParts, buildVaultDoor, buildTally, buildWindow } from './builtins.js'
 
 // ---------- SIZE KEY (1 unit = 1 m) ----------
@@ -805,4 +805,4 @@ renderer.setAnimationLoop(() => {
   if (helper) helper.update()
   renderer.render(scene, camera)
 })
-window.__mysbase = { importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
+window.__mysbase = { findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
