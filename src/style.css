@@ -51,3 +51,24 @@ textarea{width:100%;font:11px ui-monospace,monospace;border:1px solid #bbb;borde
 #slotList .slot{padding:1px 0}
 #slotList .slot.empty{color:#a35a00}
 #shareOut a{word-break:break-all}
+/* Room Kit */
+#rk{position:fixed;inset:0;background:#0007;z-index:20;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:10px}
+#rk.drag .rkBox{outline:3px dashed #2563eb}
+.rkBox{background:#fff;border-radius:12px;padding:10px;width:min(900px,100%);display:flex;flex-direction:column;gap:8px;font:13px system-ui,sans-serif}
+.rkNameL{display:flex;gap:6px;align-items:center;font-weight:600}.rkNameL input{flex:1;font-size:16px}
+#rkGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;min-height:90px}
+.rkEmpty{grid-column:1/-1;border:2px dashed #bbb;border-radius:10px;padding:24px;text-align:center}
+.rkCard{position:relative;border:1px solid #ddd;border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;background:#fafafa}
+.rkCard.bad{background:#fff4f2}
+.rkThumb{aspect-ratio:1;background:repeating-conic-gradient(#eee 0 25%,#fff 0 50%) 0 0/16px 16px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:28px}
+.rkThumb img{width:100%;height:100%;object-fit:contain}.rkThumb span{font-size:12px;padding:4px;text-align:center}
+.rkCard input.rkN,.rkCard select{width:100%;font-size:14px}
+.rkMeta label{display:inline-flex;align-items:center;gap:3px;margin-right:6px}.rkW{width:64px}
+.rkG{background:#fde68a;border-radius:4px;padding:0 4px}
+.rkX{position:absolute;top:4px;right:4px;padding:2px 7px;border-radius:50%}
+.rkActions button{font-size:15px;padding:10px 14px}
+button.pri{background:#2563eb;color:#fff}
+#rkBar{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;background:#fff;border-radius:12px;padding:6px 8px;display:flex;gap:6px;align-items:center;box-shadow:0 2px 10px #0006;z-index:12}
+body.touch #rkBar{bottom:150px}
+#rkOut{position:fixed;left:8px;right:8px;bottom:64px;margin:auto;max-width:520px;background:#fff;border-radius:12px;padding:10px;box-shadow:0 4px 20px #0008;z-index:15;font:13px system-ui,sans-serif;max-height:50vh;overflow:auto}
+@media (max-width:600px){#rkGrid{grid-template-columns:repeat(2,1fr)}#top #bKit{order:-1}}

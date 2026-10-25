@@ -104,3 +104,19 @@ For ceiling items use `"mount": "ceiling"`. Floor items settle on the floor auto
 | `mysbase-me` | session | → `{address, admin}` |
 
 The client wrappers live in `src/cloud.js` and do not touch the DOM: `shareLayout`, `saveStarterRoom`, `setAssetsPublic`, `loadShared`, `starterList`, `sharedList`, `whoAmI`. Slot helpers live in `src/slots.js`: `normSlots`, `slotSpec`, `implicitSlot`.
+
+## 🧰 Room Kit (round 4)
+
+Build a whole room from a pile of files, no JSON, no IDs.
+
+1. Tap **🧰 Room Kit** (or open `?kit`). Connect your wallet first if you want to Save.
+2. Type a **room name**, tap **Add files** — images (png/jpg/webp), 3D models (glb/gltf/obj/fbx/stl…) or a kit **.zip**. You can also drag & drop.
+3. Each card gets an auto-guessed tag (filename words, image aspect/tileability, model size):
+   wall layer · floor layer · ceiling layer · wall-mount · ceiling-mount · prop · decal. Change the tag or name any time.
+4. **Auto-layout** previews the room locally (nothing uploaded yet): layers on surfaces, doors in the south doorway,
+   wall-mounts spread across walls at eye height, ceiling-mounts evenly spaced (with lights), props backed onto walls
+   leaving the middle as a walkway, decals on walls. Close the kit and tweak in the normal editor.
+5. **Save** uploads every asset into a folder named after the room (re-uses identical files already there),
+   then saves the room to the server by asset name. Then optionally **Get share code** or (admin) **Save as starter room**
+   (asks before making those assets public).
+6. **Export kit zip** = `assets/*` + `room.json` + `README.md`. **Import kit zip** rebuilds the room; Save uploads only missing assets.

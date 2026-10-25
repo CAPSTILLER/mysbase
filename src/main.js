@@ -1,3 +1,4 @@
+import { initRoomKit, autoLayout, guessTag } from './roomkit.js'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
@@ -879,7 +880,7 @@ $('bStarter').onclick = async () => {
     } else toast(`Starter "${name}" saved at ?room=${r.slug}${priv.length ? ' (assets stay private: visitors see placeholders)' : ''}`, 4000)
   } catch (e) { toast('❌ ' + (e?.message || e), 4000) }
 }
-$('roomSel').onchange = e => loadPreset(e.target.value)
+$('roomSel').onchange = e => { if (e.target.value === '__kit') roomKit.open(); else loadPreset(e.target.value) }
 
 // ---------- boot ----------
 new GLTFLoader().load('/assets/rock1-clay.glb', g => {
@@ -906,6 +907,7 @@ app = {
   slotCat(fileName) { const k = String(fileName).toLowerCase().replace(/\.[a-z0-9]{2,5}$/, ''); const s = tpl?.slots.find(x => (x.file || x.name).toLowerCase() === k); return s ? s.category || SLOT_CAT[s.target] : null },
 }
 initCloud(app)
+const roomKit = initRoomKit({ toast, serialize, deserialize: j => { deserialize(j); tplUI() }, starterAdded: () => mergeStarters() })
 applyAmbience()
 const qs = new URLSearchParams(location.search)
 mergeStarters()
@@ -934,4 +936,4 @@ renderer.setAnimationLoop(() => {
   if (helper) helper.update()
   renderer.render(scene, camera)
 })
-window.__mysbase = { tpl: () => tpl, slotStatus, usedAssetIds, slotSpec: () => slotSpec(tpl, slotStatus()), findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
+window.__mysbase = { roomKit, autoLayout, guessTag, tpl: () => tpl, slotStatus, usedAssetIds, slotSpec: () => slotSpec(tpl, slotStatus()), findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }

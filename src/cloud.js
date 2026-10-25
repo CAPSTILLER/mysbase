@@ -121,6 +121,7 @@ export function assetType(type) {
 }
 async function signedUrl(id, file) {
   const m = metas.get(id)
+  if (m?.local) { const u = m.urls[file]; if (!u) throw new Error('missing ' + file); return { url: u, proxy: u } }
   if (m?.public && !hasSession()) return pub('mysbase-public-url', { id, file }) // starter-room visitors: public assets only
   return call('mysbase-asset-url', { id, file })
 }
@@ -133,6 +134,7 @@ async function pub(route, body = {}) {
   return j
 }
 const mine = new Set() // ids listed by My assets (public metas from other rooms are not shown there)
+const localMetas = new Map() // Room Kit previews: not uploaded yet, served from blob: URLs
 const pubMetas = new Map() // public assets that arrived with a shared room (kept across My assets refreshes)
 function addPublicMetas(list) {
   let n = 0
@@ -182,7 +184,7 @@ async function refreshAssets0() {
   try {
     const r = await call('mysbase-assets'), assets = r.assets || []
     folders = r.folders || [...new Set(assets.map(a => a.folder).filter(Boolean))].sort()
-    metas.clear(); for (const a of pubMetas.values()) metas.set(a.id, a); for (const a of assets) metas.set(a.id, a)
+    metas.clear(); for (const a of pubMetas.values()) metas.set(a.id, a); for (const a of localMetas.values()) metas.set(a.id, a); for (const a of assets) metas.set(a.id, a)
     mine.clear(); for (const a of assets) mine.add(a.id)
     for (const a of assets) if (a.kind !== 'archive') app.registerType('asset:' + a.id)
     renderAssets()
@@ -193,7 +195,7 @@ async function refreshAssets0() {
 /** Round-3 lookup: an asset by name (case/extension-insensitive), preferring the given folder. */
 export function findAsset(name, folder) {
   const k = s => String(s || '').toLowerCase().replace(/\.[a-z0-9]{2,5}$/, '').trim()
-  const all = [...metas.values()].filter(m => m.kind !== 'archive' && k(m.name) === k(name))
+  const all = [...metas.values()].filter(m => m.kind !== 'archive' && k(m.name) === k(name)).sort((a, b) => !!a.local - !!b.local) // uploaded beats a local preview
   return (folder != null && all.find(m => (m.folder || '') === folder)) || all[0] || null
 }
 export const allAssets = () => [...metas.values()]
@@ -359,21 +361,27 @@ async function pickZip(f) {
   filt.folder = folder; await refreshAssets()
 }
 /** Non-interactive version of the single-file pipeline (sane defaults: unit guess, category from name, auto snap). */
-async function ingest(fileName, ext, buf, folder, prog) {
-  const sc = app.slotCat?.(fileName) // a matching template slot decides the category
-  const id = crypto.randomUUID(), name = fileName.replace(/\.[^.]+$/, '').slice(0, 80), origFile = 'original.' + (ext === 'jpeg' ? 'jpg' : ext)
+async function ingest(fileName, ext, buf, folder, prog, over = {}) {
+  const p = await prepare(fileName, ext, buf, folder, over)
+  return uploadPrepared(p, prog)
+}
+/** CPU half of ingest (no network): parse, normalise to metres, GLB + thumbnail. Returns { meta, blobs: {file: Blob} }. Room Kit previews these before upload. */
+export async function prepare(fileName, ext, buf, folder, over = {}) {
+  ext = String(ext).toLowerCase()
+  const sc = over.category || app.slotCat?.(fileName) // a matching template slot (or Room Kit tag) decides the category
+  const id = crypto.randomUUID(), name = (over.name || fileName.replace(/\.[^.]+$/, '')).slice(0, 80), origFile = 'original.' + (ext === 'jpeg' ? 'jpg' : ext)
   if (buf.byteLength > MAX) throw new Error('over 100 MB')
   const original = { file: origFile, sha256: await sha256(buf) }
+  const ob = new Blob([buf], { type: IMG_EXT.includes(ext) ? 'image/' + (ext === 'jpg' ? 'jpeg' : ext) : 'application/octet-stream' })
   if (IMG_EXT.includes(ext)) {
-    const blob = new Blob([buf], { type: 'image/' + (ext === 'jpg' ? 'jpeg' : ext) }), img = await createImageBitmap(blob), w = 0.8
-    await put(id, origFile, blob, 'Image', prog)
+    const img = await createImageBitmap(ob), w = over.sizeM?.[0] || 0.8
     const category = (sc || guessCat(name, 'image'))
-    return { id, name, folder, kind: 'image', sourceFormat: ext, original, sizeM: [w, +(w * img.height / img.width).toFixed(3), 0.02], wall: category === 'wall-mount', category, snap: 'auto' }
+    return { meta: { id, name, folder, kind: 'image', sourceFormat: ext, original, sizeM: over.sizeM ? [...over.sizeM.slice(0, 2), 0.02] : [w, +(w * img.height / img.width).toFixed(3), 0.02], wall: category === 'wall-mount', category, snap: 'auto', px: [img.width, img.height] }, blobs: { [origFile]: ob }, image: img }
   }
   let obj = null, why = ''
   try { obj = await parse(ext, buf.slice(0)) } catch (e) { why = e?.message || 'could not read' }
   if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
-  if (!obj) { await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original', prog); return { id, name, folder, kind: 'model', sourceFormat: ext, original, needsConverter: true, note: (ext === 'gltf' ? 'GLTF with external files: zip a .glb instead. ' : '') + why.slice(0, 180) } }
+  if (!obj) return { meta: { id, name, folder, kind: 'model', sourceFormat: ext, original, needsConverter: true, note: (ext === 'gltf' ? 'GLTF with external files: zip a .glb instead. ' : '') + why.slice(0, 180) }, blobs: { [origFile]: ob } }
   const raw = measure(obj), unit = raw.y > 50 ? (raw.y > 500 ? 'mm' : 'cm') : 'm', s = UNITS[unit]
   const root = new THREE.Group(); root.add(obj); obj.scale.multiplyScalar(s); obj.updateMatrixWorld(true)
   const b = new THREE.Box3().setFromObject(obj), c = b.getCenter(new THREE.Vector3())
@@ -381,14 +389,19 @@ async function ingest(fileName, ext, buf, folder, prog) {
   const sz = measure(root), category = (sc || guessCat(name, 'model'))
   const meta = { id, name, folder, kind: 'model', sourceFormat: ext, original, sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit, scale: s,
     holds: false, wall: category === 'wall-mount', allowedPresets: ['Tabletop'], category, snap: 'auto' }
+  const blobs = { [origFile]: ob }
   let glb = null; try { glb = await new GLTFExporter().parseAsync(root, { binary: true }) } catch (e) { console.warn(e) }
-  await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original', p => prog(p / 2))
   if (glb && glb.byteLength <= MAX) {
-    await put(id, 'model.glb', new Blob([glb], { type: 'model/gltf-binary' }), 'GLB', p => prog(50 + p / 2))
-    meta.model = { file: 'model.glb', sha256: await sha256(glb) }
-    try { const t = await snapshot(root), tb = await t.arrayBuffer(); await put(id, 'thumb.png', new Blob([tb], { type: 'image/png' }), 'Thumb', () => {}); meta.thumb = { file: 'thumb.png', sha256: await sha256(tb) } } catch (e) { console.warn('thumb', e) }
+    blobs['model.glb'] = new Blob([glb], { type: 'model/gltf-binary' }); meta.model = { file: 'model.glb', sha256: await sha256(glb) }
+    try { const t = await snapshot(root), tb = await t.arrayBuffer(); blobs['thumb.png'] = new Blob([tb], { type: 'image/png' }); meta.thumb = { file: 'thumb.png', sha256: await sha256(tb) } } catch (e) { console.warn('thumb', e) }
   } else { meta.needsConverter = true; meta.note = glb ? 'GLB over 100 MB' : 'GLB export failed' }
-  return meta
+  return { meta, blobs }
+}
+/** Network half: upload every prepared blob, return the meta (caller saves it with mysbase-asset-save). */
+async function uploadPrepared({ meta, blobs }, prog = () => {}) {
+  const files = Object.keys(blobs), n = files.length
+  for (let i = 0; i < n; i++) await put(meta.id, files[i], blobs[files[i]], files[i], p => prog((i * 100 + p) / n))
+  const m = { ...meta }; delete m.px; return m
 }
 function measure(obj) { const b = new THREE.Box3().setFromObject(obj); return b.getSize(new THREE.Vector3()) }
 async function parse(ext, buf) {
@@ -566,3 +579,44 @@ export async function serverRoomList() { return hasSession() ? (await call('mysb
 export async function serverRoom(roomId) { const r = await call('mysbase-room', { roomId }); await ensureAssets(r.layout); return r }
 export const signedIn = hasSession
 export { refreshAssets }
+
+// ---------- Room Kit building blocks (DOM-free) ----------
+/** Show prepared (not yet uploaded) assets in the room via blob: URLs. Replaces any previous preview set. */
+export function setLocalAssets(list) {
+  for (const m of localMetas.values()) { metas.delete(m.id); templates.delete(m.id); loading.delete(m.id); for (const u of Object.values(m.urls)) URL.revokeObjectURL(u) }
+  localMetas.clear()
+  for (const p of list || []) { if (p.meta.needsConverter) continue; const m = { ...p.meta, local: true, urls: Object.fromEntries(Object.entries(p.blobs).map(([f, b]) => [f, URL.createObjectURL(b)])) }; localMetas.set(m.id, m); metas.set(m.id, m); app.registerType('asset:' + m.id) }
+  app.rebuildAssets(); app.assetsChanged?.()
+}
+export const localAssets = () => [...localMetas.values()]
+export const listFolders = () => [...folders]
+/** Upload prepared assets into a folder; an asset with the same name + same file hash already in that folder is reused (not uploaded again). */
+export async function uploadKit(list, folder, onRow = () => {}) {
+  await refreshAssets()
+  await call('mysbase-folder', { op: 'create', name: folder }); if (!folders.includes(folder)) folders.push(folder)
+  const out = []
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i], ex = [...metas.values()].find(m => !m.local && m.folder === folder && m.name.toLowerCase() === p.meta.name.toLowerCase())
+    if (ex && ex.original?.sha256 === p.meta.original.sha256) { if (ex.category !== p.meta.category) { await call('mysbase-asset-save', { ...ex, category: p.meta.category, wall: p.meta.category === 'wall-mount' }) } onRow(i, 'already uploaded', 100); out.push(ex.id); continue }
+    const meta = { ...p.meta, folder }
+    if (ex) { meta.id = ex.id; if (ex.public) meta.public = true } // same name, new file: replace in place so rooms by name keep working
+    const m = await uploadPrepared({ meta, blobs: p.blobs }, pc => onRow(i, `uploading ${Math.round(pc)}%`, pc))
+    await call('mysbase-asset-save', m); onRow(i, '✅ uploaded', 100); out.push(m.id)
+  }
+  setLocalAssets([]); await refreshAssets()
+  return out
+}
+/** Save a layout as a server room (versioned). */
+export async function saveRoomAs(roomId, layout) { return call('mysbase-room-save', { roomId, layout }) }
+/** Bytes of an asset for a kit export: local preview blob, else the uploaded GLB (models) or original (images). */
+export async function assetBytes(m) {
+  const file = m.kind === 'image' ? m.original.file : m.model ? 'model.glb' : m.original.file
+  const u = await signedUrl(m.id, file)
+  let r; try { r = await fetch(u.url) } catch { r = null }
+  if (!r?.ok) r = await fetch(u.proxy)
+  if (!r.ok) throw new Error(`${m.name}: HTTP ${r.status}`)
+  return { bytes: new Uint8Array(await r.arrayBuffer()), ext: file === 'model.glb' ? 'glb' : (m.sourceFormat || file.split('.').pop()) }
+}
+export { MODEL_EXT, IMG_EXT }
+/** Connect a wallet if none is connected yet (Room Kit Save). */
+export async function ensureWallet() { if (!account) await connect(); if (!account) throw new Error('Connect a wallet first') }
