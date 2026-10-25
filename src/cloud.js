@@ -119,7 +119,26 @@ export function assetType(type) {
     },
   }
 }
-async function signedUrl(id, file) { return call('mysbase-asset-url', { id, file }) }
+async function signedUrl(id, file) {
+  const m = metas.get(id)
+  if (m?.public && !hasSession()) return pub('mysbase-public-url', { id, file }) // starter-room visitors: public assets only
+  return call('mysbase-asset-url', { id, file })
+}
+const hasSession = () => { const c = JSON.parse(sessionStorage.getItem('mysbase.session') || 'null'); return !!(account && c && c.a === account.toLowerCase() && c.exp > Date.now() / 1000 + 60) }
+/** Public (no-session) API call: shared rooms, starter list, public asset URLs. */
+async function pub(route, body = {}) {
+  const r = await fetch(`${API}/api/rocks/${route}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const j = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
+  return j
+}
+const mine = new Set() // ids listed by My assets (public metas from other rooms are not shown there)
+const pubMetas = new Map() // public assets that arrived with a shared room (kept across My assets refreshes)
+function addPublicMetas(list) {
+  let n = 0
+  for (const a of list || []) { pubMetas.set(a.id, a); if (!metas.has(a.id)) { metas.set(a.id, a); app.registerType('asset:' + a.id); n++ } }
+  if (n) { app.rebuildAssets(); app.assetsChanged?.() }
+}
 async function loadTemplate(m) {
   if (templates.has(m.id)) return templates.get(m.id)
   if (loading.has(m.id)) return loading.get(m.id)
@@ -149,8 +168,10 @@ async function loadTemplate(m) {
 let assetsP = null
 /** Fetch the wallet's My assets list once before importing a layout that references uploads. Never throws. */
 export async function ensureAssets(layout) {
-  if (!JSON.stringify(layout || {}).includes('asset:') || metas.size) return true
+  const t = JSON.stringify(layout || {})
+  if (!(t.includes('asset:') || t.includes('"slots"') || t.includes('slot:')) || [...metas.values()].some(m => !pubMetas.has(m.id))) return true
   if (!account) { app.toast('Layout uses uploaded assets: connect + sign in to load them (placeholders keep their spots)', 4000); return false }
+  if (!hasSession()) return false // don't pop a signature just for loading; Sign in fills the placeholders
   return refreshAssets()
 }
 function refreshAssets() { return assetsP || (assetsP = refreshAssets0().finally(() => { assetsP = null })) }
@@ -161,7 +182,8 @@ async function refreshAssets0() {
   try {
     const r = await call('mysbase-assets'), assets = r.assets || []
     folders = r.folders || [...new Set(assets.map(a => a.folder).filter(Boolean))].sort()
-    metas.clear(); for (const a of assets) metas.set(a.id, a)
+    metas.clear(); for (const a of pubMetas.values()) metas.set(a.id, a); for (const a of assets) metas.set(a.id, a)
+    mine.clear(); for (const a of assets) mine.add(a.id)
     for (const a of assets) if (a.kind !== 'archive') app.registerType('asset:' + a.id)
     renderAssets()
     app.rebuildAssets(); app.assetsChanged?.()
@@ -213,7 +235,7 @@ async function folderAct(op) {
 const thumbs = new Map() // id -> url (signed or data:)
 function shown() {
   const q = filt.q.toLowerCase()
-  return [...metas.values()].filter(a => (filt.folder === '*' || (a.folder || '') === filt.folder) && (!filt.cat || (a.category || (a.wall ? 'wall-mount' : 'prop')) === filt.cat) && (!q || a.name.toLowerCase().includes(q) || (a.folder || '').toLowerCase().includes(q)))
+  return [...metas.values()].filter(a => mine.has(a.id) && (filt.folder === '*' || (a.folder || '') === filt.folder) && (!filt.cat || (a.category || (a.wall ? 'wall-mount' : 'prop')) === filt.cat) && (!q || a.name.toLowerCase().includes(q) || (a.folder || '').toLowerCase().includes(q)))
 }
 function renderAssets(bar = true) {
   if (bar || !$('amQ')) mgrBar()
@@ -338,13 +360,14 @@ async function pickZip(f) {
 }
 /** Non-interactive version of the single-file pipeline (sane defaults: unit guess, category from name, auto snap). */
 async function ingest(fileName, ext, buf, folder, prog) {
+  const sc = app.slotCat?.(fileName) // a matching template slot decides the category
   const id = crypto.randomUUID(), name = fileName.replace(/\.[^.]+$/, '').slice(0, 80), origFile = 'original.' + (ext === 'jpeg' ? 'jpg' : ext)
   if (buf.byteLength > MAX) throw new Error('over 100 MB')
   const original = { file: origFile, sha256: await sha256(buf) }
   if (IMG_EXT.includes(ext)) {
     const blob = new Blob([buf], { type: 'image/' + (ext === 'jpg' ? 'jpeg' : ext) }), img = await createImageBitmap(blob), w = 0.8
     await put(id, origFile, blob, 'Image', prog)
-    const category = guessCat(name, 'image')
+    const category = (sc || guessCat(name, 'image'))
     return { id, name, folder, kind: 'image', sourceFormat: ext, original, sizeM: [w, +(w * img.height / img.width).toFixed(3), 0.02], wall: category === 'wall-mount', category, snap: 'auto' }
   }
   let obj = null, why = ''
@@ -355,7 +378,7 @@ async function ingest(fileName, ext, buf, folder, prog) {
   const root = new THREE.Group(); root.add(obj); obj.scale.multiplyScalar(s); obj.updateMatrixWorld(true)
   const b = new THREE.Box3().setFromObject(obj), c = b.getCenter(new THREE.Vector3())
   obj.position.set(obj.position.x - c.x, obj.position.y - b.min.y, obj.position.z - c.z); root.updateMatrixWorld(true)
-  const sz = measure(root), category = guessCat(name, 'model')
+  const sz = measure(root), category = (sc || guessCat(name, 'model'))
   const meta = { id, name, folder, kind: 'model', sourceFormat: ext, original, sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit, scale: s,
     holds: false, wall: category === 'wall-mount', allowedPresets: ['Tabletop'], category, snap: 'auto' }
   let glb = null; try { glb = await new GLTFExporter().parseAsync(root, { binary: true }) } catch (e) { console.warn(e) }
@@ -521,3 +544,25 @@ export function layerSource(id) {
   })()
   layerSrc.set(id, p); p.catch(() => layerSrc.delete(id)); return p
 }
+
+// ---------- round 3: shared rooms (short codes), starter rooms, public assets ----------
+// Plain async functions (no DOM) so other tools (e.g. a future Room Kit) can call them directly.
+let me = null // {address, admin}
+export async function whoAmI() { if (!me || me.address.toLowerCase() !== account?.toLowerCase()) me = await call('mysbase-me'); return me }
+/** Save a layout under a new 6-char code anyone with the app can load (?room=<code>). */
+export async function shareLayout(layout, { name, kind, assetIds } = {}) {
+  return call('mysbase-share', { layout, name, kind: kind || (layout?.slots ? 'template' : 'room'), assetIds: assetIds || [] })
+}
+/** Admin only: publish as a starter room at ?room=<slug>. */
+export async function saveStarterRoom(slug, layout, { name, assetIds } = {}) {
+  return call('mysbase-starter-save', { slug, name, layout, kind: layout?.slots ? 'template' : 'room', assetIds: assetIds || [] })
+}
+export async function setAssetsPublic(ids, on = true) { const r = await call('mysbase-public', { ids, public: on }); for (const id of ids) { const m = metas.get(id); if (m) m.public = on }; return r }
+/** No session needed: a shared room or starter by code/slug (+ its public asset metas, merged so they load). */
+export async function loadShared(id) { const r = await pub('mysbase-shared', { id }); addPublicMetas(r.assets); return r }
+export async function starterList() { try { return (await pub('mysbase-starters')).starters || [] } catch { return [] } }
+export async function sharedList() { return hasSession() ? call('mysbase-shared-list') : { shared: [] } }
+export async function serverRoomList() { return hasSession() ? (await call('mysbase-rooms')).rooms || [] : [] }
+export async function serverRoom(roomId) { const r = await call('mysbase-room', { roomId }); await ensureAssets(r.layout); return r }
+export const signedIn = hasSession
+export { refreshAssets }

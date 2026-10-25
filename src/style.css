@@ -45,3 +45,9 @@ textarea{width:100%;font:11px ui-monospace,monospace;border:1px solid #bbb;borde
 .fhead{grid-column:1/-1;font-weight:700;color:#555;margin-top:6px}
 #zipLog{background:#f6f8fc;border-radius:8px;padding:6px;margin:4px 0;max-height:220px;overflow:auto}#zipLog .zr{display:flex;gap:6px;align-items:center;font-size:12px}#zipLog progress{width:90px}.zr .err{color:#b91c1c}.zr .ok{color:#15803d}
 @media (max-width:600px){#assetList.grid{grid-template-columns:repeat(2,1fr)}}
+#tplList{display:flex;flex-direction:column;gap:4px;margin:4px 0}
+#tplList button{margin:2px}
+#tplList .fhead{font-weight:600;font-size:12px;margin-top:4px}
+#slotList .slot{padding:1px 0}
+#slotList .slot.empty{color:#a35a00}
+#shareOut a{word-break:break-all}

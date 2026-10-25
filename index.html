@@ -24,7 +24,7 @@
   <button id="bView">3rd person</button>
   <button id="bDev">Dev mode: off</button>
   <button id="bHelp">?</button>
-  <select id="roomSel" title="Built-in rooms (no wallet needed)"><option value="starter">Starter room</option><option value="vault42">Vault 42</option></select>
+  <select id="roomSel" title="Starter rooms (no wallet needed)"><option value="starter">Starter room</option><option value="vault42">Vault 42</option><option value="example-template">Example template (slots)</option><option value="never-happier">Never Happier (template)</option></select>
   <button id="bWallet">Connect wallet</button>
 </div>
 <div id="dev" class="hidden">
@@ -47,6 +47,15 @@
     <div class="row"><span>Device</span><button id="bSave">Save</button><button id="bLoad">Load</button><button id="bClear">Reset</button></div>
     <div class="row"><span>Server</span><input id="roomId" list="roomIds" size="12" maxlength="40" title="Room id (lowercase letters, digits, dashes)"><datalist id="roomIds"></datalist>
       <button id="bSaveSrv">Save to server</button><button id="bLoadSrv">Load from server</button><select id="roomVer" class="hidden" title="Saved versions (last 10)"></select></div>
+  </details>
+  <details id="tplSec"><summary>Templates · slots · share</summary>
+    <div class="row"><button id="bTplList">Load template…</button><button id="bSlots" title="Copy a spec an AI can use to make the images/models">List slots · copy spec</button></div>
+    <div id="tplList" class="hidden"></div>
+    <div id="slotList" class="small"></div>
+    <div class="row"><span>Code</span><input id="codeIn" size="8" maxlength="40" placeholder="abc234" autocapitalize="off" spellcheck="false"><button id="bCodeLoad">Load</button><button id="bShare" title="Save this room and get a 6-letter code (needs sign-in)">Get share code</button></div>
+    <div class="row small hidden" id="shareOut"></div>
+    <div class="row hidden" id="starterRow"><button id="bStarter">Save as starter room</button><span class="small">admin: everyone sees it in the room list</span></div>
+    <div class="small">Templates reference assets by name. Upload files (or a zip) named like the slots and the room builds itself. Format: docs/templates.md</div>
   </details>
   <details><summary>Surfaces (walls · floor · ceiling)</summary>
     <div class="row"><span>Surface</span><select id="sfFace"><option value="walls">All walls</option><option value="floor">Floor</option><option value="ceiling">Ceiling</option><option value="north">North wall (override)</option><option value="south">South wall (override)</option><option value="east">East wall (override)</option><option value="west">West wall (override)</option></select>

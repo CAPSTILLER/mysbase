@@ -1,7 +1,9 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import * as cloud from './cloud.js'
 import { initCloud, assetType, assetMetas, layerSource, ensureAssets, snapOfMeta, findAsset, allAssets } from './cloud.js'
+import { normSlots, slotSpec, SLOT_CAT, implicitSlot } from './slots.js'
 import { LAYERS, layerParts, buildVaultDoor, buildTally, buildWindow } from './builtins.js'
 
 // ---------- SIZE KEY (1 unit = 1 m) ----------
@@ -87,11 +89,11 @@ const DEFAULT_SURFACES = () => ({ walls: [layer('core-layer:plaster'), null, nul
 let surfaces = DEFAULT_SURFACES()
 const outer = { north: 0, south: 0, east: 0, west: 0, floor: 0, ceiling: 0 } // outermost layer depth per face (m)
 const bounds = () => ({ x0: -W / 2 + outer.west, x1: W / 2 - outer.east, z0: -D / 2 + outer.north, z1: D / 2 - outer.south, y0: outer.floor, y1: H - outer.ceiling })
-function normLayers(a) { const out = [0, 1, 2].map(i => { const L = a?.[i]; if (!L || !L.asset) return null
-  return { asset: String(L.asset), offsetM: Math.max(0, Math.min(MAX_OFFSET, +L.offsetM || 0)), uvScale: Array.isArray(L.uvScale) ? [+L.uvScale[0] || 1, +(L.uvScale[1] ?? L.uvScale[0]) || 1] : [+L.uvScale || 1, +L.uvScale || 1], color: L.color || null } }); return out }
+function normLayers(a, face) { const out = [0, 1, 2].map(i => { const L = a?.[i]; if (!L || !L.asset) return null
+  return { asset: typeof L.asset === 'object' ? addImplicit(L.asset, { type: 'image', tileable: true, target: face }) : String(L.asset), offsetM: Math.max(0, Math.min(MAX_OFFSET, +L.offsetM || 0)), uvScale: Array.isArray(L.uvScale) ? [+L.uvScale[0] || 1, +(L.uvScale[1] ?? L.uvScale[0]) || 1] : [+L.uvScale || 1, +L.uvScale || 1], color: L.color || null } }); return out }
 function normSurfaces(s) {
-  const d = DEFAULT_SURFACES(), o = { walls: normLayers(s?.walls ?? d.walls), floor: normLayers(s?.floor ?? d.floor), ceiling: normLayers(s?.ceiling ?? d.ceiling), overrides: {} }
-  for (const f of WALL_FACES) if (s?.overrides?.[f]) o.overrides[f] = normLayers(s.overrides[f])
+  const d = DEFAULT_SURFACES(), o = { walls: normLayers(s?.walls ?? d.walls, 'wall'), floor: normLayers(s?.floor ?? d.floor, 'floor'), ceiling: normLayers(s?.ceiling ?? d.ceiling, 'ceiling'), overrides: {} }
+  for (const f of WALL_FACES) if (s?.overrides?.[f]) o.overrides[f] = normLayers(s.overrides[f], 'wall')
   return o
 }
 const layersFor = f => f === 'floor' ? surfaces.floor : f === 'ceiling' ? surfaces.ceiling : surfaces.overrides[f] || surfaces.walls
@@ -106,12 +108,16 @@ function faceGeo(f) {
 }
 const resolved = new Map() // 'asset:<id>' -> {kind,tex,sizeM}|{kind:'model',obj}
 let surfGroup = null
-function layerMaterial(f, L) {
-  const b = LAYERS[L.asset], up = resolved.get(L.asset)
-  let parts, tile
-  if (b) { parts = layerParts(L.asset); tile = b.tileM } else if (up?.kind === 'image') { parts = { map: up.tex }; tile = [up.sizeM[0] || 1, up.sizeM[1] || 1] } else return null
+function layerMaterial(f, L, key = L.asset, slot = null) {
+  const b = LAYERS[key], up = resolved.get(key), F = FACES[f]
+  let parts, tile, fit = false
+  if (b) { parts = layerParts(key); tile = b.tileM }
+  else if (up?.kind === 'image') { parts = { map: up.tex }; tile = [up.sizeM[0] || 1, up.sizeM[1] || 1]
+    if (slot) { fit = !slot.tileable; tile = fit ? [F.U[1] - F.U[0], F.Vr[1] - F.Vr[0]] : [slot.sizeM[0] || 1, slot.sizeM[1] || 1] } }
+  else if (slot) return new THREE.MeshStandardMaterial({ color: '#c9c2dc', roughness: 1 }) // unresolved slot placeholder
+  else return null
   const o = { roughness: 0.9, ...parts }
-  for (const k of ['map', 'emissiveMap']) if (parts[k]) { const t = parts[k].clone(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / (tile[0] * L.uvScale[0]), 1 / (tile[1] * L.uvScale[1])); t.needsUpdate = true; o[k] = t }
+  for (const k of ['map', 'emissiveMap']) if (parts[k]) { const t = parts[k].clone(); t.wrapS = t.wrapT = fit ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping; t.repeat.set(1 / (tile[0] * L.uvScale[0]), 1 / (tile[1] * L.uvScale[1])); if (fit) t.offset.set(-F.U[0] / tile[0], -F.Vr[0] / tile[1]); t.needsUpdate = true; o[k] = t }
   o.color = L.color || (b?.paintable && WALL_FACES.includes(f) ? '#' + wallMat.color.getHexString() : '#ffffff')
   return new THREE.MeshStandardMaterial(o)
 }
@@ -138,12 +144,13 @@ function buildSurfaces() {
       depth += L.offsetM; n++
       const N = depth + n * 0.0006
       let obj = null, thick = 0
-      if (L.asset.startsWith('asset:') && !resolved.has(L.asset)) {
-        layerSource(L.asset.slice(6)).then(r => { resolved.set(L.asset, r); buildSurfaces(); reflow() }).catch(() => {})
+      const slot = L.asset.startsWith('slot:') ? slotOf(L.asset.slice(5)) : null, sm = slot && slotAsset(slot), key = slot ? (sm ? 'asset:' + sm.id : null) : L.asset
+      if (key?.startsWith('asset:') && !resolved.has(key)) {
+        layerSource(key.slice(6)).then(r => { resolved.set(key, r); buildSurfaces(); reflow() }).catch(() => {})
       }
-      const up = resolved.get(L.asset)
+      const up = key && resolved.get(key)
       if (up?.kind === 'model') { const t = modelTiles(f, L, up.obj); obj = t.g; thick = t.t }
-      else { const m = layerMaterial(f, L); if (m) { obj = new THREE.Mesh(faceGeo(f), m); obj.receiveShadow = true; obj.userData.shared = false } }
+      else { const m = layerMaterial(f, L, key, slot); if (m) { obj = new THREE.Mesh(faceGeo(f), m); obj.receiveShadow = true; obj.userData.shared = false } }
       if (!obj) continue
       obj.matrixAutoUpdate = false; obj.matrix.copy(basis).setPosition(F.o.clone().addScaledVector(F.n, N)); surfGroup.add(obj)
       depth += thick
@@ -203,7 +210,52 @@ function makeAvatarMesh(color) {
   const visor = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.07, 0.1), std('#1f2a44')); visor.position.set(0, AVATAR.eye, 0.2); g.add(visor)
   return g
 }
-const def = t => CATALOG[t] || (String(t).startsWith('asset:') ? (CATALOG[t] = assetType(t)) : null)
+const def = t => CATALOG[t] || (String(t).startsWith('asset:') ? (CATALOG[t] = assetType(t)) : String(t).startsWith('slot:') ? (CATALOG[t] = slotType(t)) : null)
+
+// ---------- template slots (round 3): assets referenced by name + folder ----------
+let app = null // hooks shared with cloud.js
+let tpl = null // { name, folder, slots: [...] } of the loaded template, or null for a plain layout
+const slotOf = n => tpl?.slots.find(s => s.name === n) || null
+const slotAsset = s => (s ? findAsset(s.file || s.name, s.folder ?? tpl?.folder) : null)
+function addImplicit(ref, o) { // {name, folder} used directly in a layout -> an implicit slot
+  tpl = tpl || { name: '', folder: undefined, slots: [] }
+  const s = implicitSlot(ref, o); if (!slotOf(s.name)) tpl.slots.push(s); return 'slot:' + s.name
+}
+const slotTex = new Map() // asset id -> texture for image slots
+function slotType(t) {
+  const s = slotOf(t.slice(5)) || implicitSlot({ name: t.slice(5) }, {}), m = slotAsset(s)
+  const target = s.target, category = s.category || SLOT_CAT[target] || 'prop', snap = snapOfMeta({ category })
+  const wallish = target === 'wall-mount' || target === 'decal'
+  const pose = { category, snap, wallOnly: wallish, ceilOnly: snap === 'top', free: snap === 'center', slot: s.name }
+  if (m && m.kind === 'model') { const b = assetType('asset:' + m.id); return { ...b, ...pose, name: `${s.name} · ${m.name}` } }
+  const sz = [s.sizeM[0], s.sizeM[1], target === 'decal' ? 0.002 : s.sizeM[2] ?? (s.type === 'image' ? 0.02 : 0.05)]
+  const flat = m?.kind === 'image' && s.type === 'model' ? [sz[0], sz[1], 0.01] : sz
+  return { name: m ? `${s.name} · ${m.name}` : `${s.name} (empty slot)`, size: flat, top: flat[1], allowedPresets: [], unresolved: !m, ...pose,
+    build(g) {
+      const tex = m && slotTex.get(m.id)
+      if (!tex) {
+        const ph = new THREE.Mesh(new THREE.BoxGeometry(flat[0], flat[1], Math.max(flat[2], 0.01)), new THREE.MeshStandardMaterial({ color: '#e8a24a', wireframe: true }))
+        ph.position.set(0, flat[1] / 2, wallish ? Math.max(flat[2], 0.01) / 2 : 0); g.add(ph)
+        if (m) layerSource(m.id).then(r => { slotTex.set(m.id, r.tex); app.refreshType(t) }).catch(() => {})
+        return
+      }
+      const alpha = target === 'decal' || s.type === 'model' || s.alpha === true || /png|webp/.test(m.sourceFormat || m.original?.file || '')
+      const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, transparent: alpha, alphaTest: alpha ? 0.04 : 0, side: s.type === 'model' ? THREE.DoubleSide : THREE.FrontSide })
+      if (wallish && !alpha) { // poster/panel: thin board
+        const pl = new THREE.Mesh(new THREE.BoxGeometry(flat[0], flat[1], flat[2]), [0, 0, 0, 0, 1, 0].map(f => f ? mat : new THREE.MeshStandardMaterial({ color: '#222' })))
+        pl.position.set(0, flat[1] / 2, flat[2] / 2); g.add(pl)
+      } else { const pl = new THREE.Mesh(new THREE.PlaneGeometry(flat[0], flat[1]), mat); pl.position.set(0, flat[1] / 2, wallish ? 0.001 : 0); g.add(pl) } // decal / cutout
+    } }
+}
+function refreshSlots() { for (const t of Object.keys(CATALOG)) if (t.startsWith('slot:')) delete CATALOG[t]; for (const t of new Set(items.map(i => i.type))) if (t.startsWith('slot:')) app.refreshType(t) }
+function slotStatus() { return (tpl?.slots || []).map(s => { const m = slotAsset(s); return { ...s, filled: m ? `${m.folder ? m.folder + '/' : ''}${m.name}` : null, kindOk: !m || (s.type === 'model' ? m.kind === 'model' : m.kind === 'image') } }) }
+function usedAssetIds() {
+  const ids = new Set()
+  for (const it of items) { if (it.type.startsWith('asset:')) ids.add(it.type.slice(6)); else if (it.type.startsWith('slot:')) { const m = slotAsset(slotOf(it.type.slice(5))); if (m) ids.add(m.id) } }
+  for (const f of Object.keys(FACES)) for (const L of layersFor(f)) { if (!L) continue; if (L.asset.startsWith('asset:')) ids.add(L.asset.slice(6)); else if (L.asset.startsWith('slot:')) { const m = slotAsset(slotOf(L.asset.slice(5))); if (m) ids.add(m.id) } }
+  for (const s of tpl?.slots || []) { const m = slotAsset(s); if (m) ids.add(m.id) }
+  return [...ids]
+}
 
 // ---------- items ----------
 let items = [] // {id,type,group,preset,scale,parent,wall,face,allowed,light?,pending?}
@@ -647,7 +699,7 @@ function serialize() {
     pos: v3(it.group.position), rotY: Math.round(it.group.rotation.y / DEG), scale: +it.scale.toFixed(4), preset: it.preset ?? null, parent: it.parent ?? null,
     wall: !!it.wall, face: it.face ?? null, mount: it.mount ?? (it.wall ? 'wall' : null), allowed: [...it.allowed],
     ...(it.unresolved && it.src ? { pos: it.src.pos, rotY: it.src.rotY, category: it.src.category, name: it.src.name } : {}) })
-  return { version: 2, room: { ...ROOM, door: { ...DOOR }, units: 'm' }, ambience: { ...ambience }, surfaces: structuredClone(surfaces),
+  return { version: 2, ...(tpl?.slots.length ? { kind: 'template', name: tpl.name, folder: tpl.folder, slots: structuredClone(tpl.slots) } : {}), room: { ...ROOM, door: { ...DOOR }, units: 'm' }, ambience: { ...ambience }, surfaces: structuredClone(surfaces),
     wallPaint: '#' + wallMat.color.getHexString(), presets: structuredClone(presets),
     lights: real.filter(isLight).map(it => ({ ...base(it), kind: it.light.kind, color: it.light.color, intensity: it.light.intensity, distance: it.light.distance, angle: it.light.angle, penumbra: it.light.penumbra })),
     items: real.filter(it => !isLight(it)).map(base) }
@@ -664,11 +716,15 @@ function deserialize(raw) {
   if (sel) { sel.pending = false; } select(null); for (const it of items) scene.remove(it.group); items = []; nextId = 1
   presets = j.presets?.length ? j.presets : [{ name: 'Tabletop', ratio: 0.1 }]
   wallMat.color.set(j.wallPaint || '#d9cfc0'); $('paint').value = '#' + wallMat.color.getHexString()
+  tpl = j.slots || j.kind === 'template' ? { name: String(j.name || ''), folder: j.folder, slots: normSlots(j.slots) } : null
+  for (const t of Object.keys(CATALOG)) if (t.startsWith('slot:')) delete CATALOG[t]
   applyAmbience(j.ambience); surfaces = normSurfaces(j.surfaces); buildSurfaces()
   let skipped = 0
   const all = [...(j.items || []), ...(j.lights || []).map(l => ({ ...l, typeId: l.typeId || (l.kind === 'spot' ? 'core:light-spot' : 'core:light-point') }))]
   for (const d of all) {
-    const t = d.typeId || d.type; if (!def(t)) continue
+    const ref = d.asset && typeof d.asset === 'object' ? d.asset : null // {name, folder}
+    const t = ref ? addImplicit(ref, { type: 'model', target: d.mount === 'ceiling' ? 'ceiling-mount' : d.wall ? 'wall-mount' : 'placed model', sizeM: d.sizeM, category: d.category }) : d.slot ? 'slot:' + d.slot : d.typeId || d.type
+    if (!def(t)) continue
     const dd = def(t); if ((dd.light || dd.lights) && lightCount() + (dd.lights || 1) > MAX_LIGHTS) { skipped++; continue }
     const it = addItem(t, { id: d.id, allowed: d.allowed || [...(dd.presets || [])], light: dd.light ? { kind: d.kind || dd.light, color: d.color || '#ffe8c4', intensity: d.intensity ?? 3, distance: d.distance ?? 6, angle: d.angle ?? 45, penumbra: d.penumbra ?? 0.4 } : undefined })
     const pr = d.preset && presets.find(p => p.name === d.preset)
@@ -749,10 +805,79 @@ function starter() {
   ] })
   $('roomSel').value = 'starter'
 }
+const BUILTIN_ROOMS = { vault42: 'Vault 42', 'example-template': 'Example template (slots)', 'never-happier': 'Never Happier (template)' }
+function roomOption(v, label) { const sel = $('roomSel'); if (![...sel.options].some(o => o.value === v)) sel.add(new Option(label, v)); sel.value = v }
 async function loadPreset(name) {
+  name = String(name || '').trim().toLowerCase()
   if (name === 'starter') { starter(); history.replaceState(null, '', location.pathname); return }
-  try { const r = await fetch(`/rooms/${encodeURIComponent(name)}.json`); if (!r.ok) throw 0; deserialize(await r.json()); $('roomSel').value = name
-    const u = new URLSearchParams(location.search); u.set('room', name); history.replaceState(null, '', '?' + u); toast(`Room "${name}" loaded`) } catch { toast(`No built-in room "${name}"`) }
+  let j, label
+  try {
+    if (BUILTIN_ROOMS[name]) { const r = await fetch(`/rooms/${encodeURIComponent(name)}.json`); if (!r.ok) throw new Error('missing'); j = await r.json(); label = BUILTIN_ROOMS[name] }
+    else { const r = await cloud.loadShared(name); j = r.layout; label = (r.starter ? '★ ' : '# ') + r.name }
+  } catch (e) { toast(`No room "${name}" (${e?.message || e})`); return }
+  deserialize(j); roomOption(name, label)
+  const u = new URLSearchParams(location.search); u.set('room', name); history.replaceState(null, '', '?' + u)
+  const ph = items.filter(i => i.unresolved).length
+  toast(`Room "${label}" loaded` + (ph ? ` · ${ph} empty slot(s)/placeholder(s): upload matching assets or sign in` : ''), ph ? 4000 : 2200)
+  if (await ensureAssets(j)) { refreshSlots(); buildSurfaces(); reflow() }
+  tplUI()
+}
+async function mergeStarters() { for (const s of await cloud.starterList()) roomOption(s.slug, '★ ' + s.name); $('roomSel').value = new URLSearchParams(location.search).get('room') || $('roomSel').value }
+// ---------- template / share UI ----------
+function tplUI() {
+  const box = $('slotList'); if (!box) return
+  const st = slotStatus()
+  if (!st.length) { box.textContent = 'No template slots in this room.'; return }
+  box.innerHTML = `<b>${tpl.name || 'Template'}</b>${tpl.folder ? ` · 📁 ${tpl.folder}` : ''} · ${st.filter(s => s.filled).length}/${st.length} slots filled`
+  for (const s of st) { const d = document.createElement('div'); d.className = 'slot ' + (s.filled ? 'ok' : 'empty'); d.textContent = `${s.filled ? (s.kindOk ? '✅' : '🟨') : '⬜'} ${s.name} · ${s.type} ${s.sizeM.join('×')} m · ${s.target}${s.tileable ? ' · tileable' : ''}${s.filled ? ' ← ' + s.filled : ''}`; box.appendChild(d) }
+}
+$('bSlots').onclick = async () => {
+  const t = slotSpec(tpl, slotStatus()); $('ioText').value = t; tplUI()
+  try { await navigator.clipboard.writeText(t); toast('Slot spec copied (also in JSON box)') } catch { toast('Slot spec is in the JSON box') }
+}
+$('bTplList').onclick = async () => {
+  const box = $('tplList'); box.classList.toggle('hidden'); if (box.classList.contains('hidden')) return
+  box.innerHTML = '<span class="small">Loading…</span>'
+  const rows = [['Starter rooms', [['starter', 'Starter room'], ...Object.entries(BUILTIN_ROOMS)]]]
+  const st = await cloud.starterList(); if (st.length) rows[0][1].push(...st.map(s => [s.slug, '★ ' + s.name]))
+  let mine = [], srv = []
+  try { const r = await cloud.sharedList(); mine = (r.shared || []).filter(x => !x.starter); srv = await cloud.serverRoomList() } catch { /* not signed in */ }
+  rows.push(['Yours (share codes)', mine.map(x => [x.id, `${x.name} · ${x.id}${x.kind === 'template' ? ' · template' : ''}`])])
+  rows.push(['Yours (server rooms)', srv.map(r => ['srv:' + r.roomId, r.roomId])])
+  box.innerHTML = ''
+  for (const [h, list] of rows) {
+    const d = document.createElement('div'); d.innerHTML = `<div class="fhead">${h}</div>`; if (!list.length) d.insertAdjacentHTML('beforeend', `<span class="small">${cloud.signedIn() ? 'none yet' : 'sign in to see yours'}</span>`)
+    for (const [v, t] of list) { const b = document.createElement('button'); b.textContent = t; b.onclick = async () => { box.classList.add('hidden'); if (v.startsWith('srv:')) { try { const r = await cloud.serverRoom(v.slice(4)); deserialize(r.layout); tplUI(); toast(`Loaded "${r.roomId}"`) } catch (e) { toast('❌ ' + e.message) } } else loadPreset(v) }; d.appendChild(b) }
+    box.appendChild(d)
+  }
+}
+$('bCodeLoad').onclick = () => { const v = $('codeIn').value.trim().toLowerCase(); if (v) loadPreset(v) }
+$('codeIn').onkeydown = e => { if (e.key === 'Enter') $('bCodeLoad').click() }
+$('bShare').onclick = async () => {
+  try {
+    const name = tpl?.name || prompt('Name for this room', 'My room'); if (name == null) return
+    const r = await cloud.shareLayout(serialize(), { name, assetIds: usedAssetIds() })
+    const link = `${location.origin}${location.pathname}?room=${r.code}`
+    $('shareOut').innerHTML = `Code <b>${r.code}</b> · <a href="${link}" target="_blank">${link}</a>`; $('shareOut').classList.remove('hidden')
+    navigator.clipboard?.writeText(link).catch(() => {}); toast(`Share code ${r.code} (link copied)`, 4000)
+  } catch (e) { toast('❌ ' + (e?.message || e), 4000) }
+}
+async function checkAdmin() { try { if (cloud.signedIn()) $('starterRow').classList.toggle('hidden', !(await cloud.whoAmI()).admin) } catch { /* ignore */ } }
+$('tplSec').addEventListener('toggle', () => { if ($('tplSec').open) { tplUI(); checkAdmin() } })
+$('bSignIn').addEventListener('click', () => setTimeout(checkAdmin, 1500))
+$('bStarter').onclick = async () => {
+  try {
+    if (!(await cloud.whoAmI()).admin) return toast('Only admin wallets can save starter rooms')
+    const name = prompt('Starter room name (everyone will see it)', tpl?.name || ''); if (!name) return
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+    if (!confirm(`Publish "${name}" as a starter room at ?room=${slug} ? (free signature, no gas)`)) return
+    const ids = usedAssetIds(), r = await cloud.saveStarterRoom(slug, serialize(), { name, assetIds: ids })
+    roomOption(r.slug, '★ ' + name)
+    const priv = ids.filter(id => !allAssets().find(a => a.id === id)?.public)
+    if (priv.length && confirm(`This room uses ${priv.length} private asset(s). Make them PUBLIC so visitors don't see placeholders?\n\n` + priv.map(id => '• ' + (allAssets().find(a => a.id === id)?.name || id)).join('\n'))) {
+      const p = await cloud.setAssetsPublic(priv, true); toast(`Starter "${name}" saved · ${p.updated} asset(s) now public`, 4000)
+    } else toast(`Starter "${name}" saved at ?room=${r.slug}${priv.length ? ' (assets stay private: visitors see placeholders)' : ''}`, 4000)
+  } catch (e) { toast('❌ ' + (e?.message || e), 4000) }
 }
 $('roomSel').onchange = e => loadPreset(e.target.value)
 
@@ -766,20 +891,24 @@ new GLTFLoader().load('/assets/rock1-clay.glb', g => {
   for (const it of items) if (it.type === 'core:rock') { it.group.clear(); it.group.add(rockTemplate.clone(true)) }
   for (const it of items) resolve(it)
 }, undefined, () => toast('Rock model failed to load'))
-initCloud({
+app = {
   toast, spawn, serialize, deserialize,
   registerType(t) { CATALOG[t] = assetType(t) },
   refreshType(t) {
-    CATALOG[t] = assetType(t); let touched = false
+    CATALOG[t] = t.startsWith('slot:') ? slotType(t) : assetType(t); let touched = false
     for (const it of items) if (it.type === t) { const gh = it.pending; it.group.clear(); CATALOG[t].build(it.group); it.group.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true }); if (gh) setGhost(it, true); resolvePlaceholder(it); touched = true }
     if (touched) reflow()
     if (sel) refreshSel()
+    if (!t.startsWith('slot:')) refreshSlots()
   },
   rebuildAssets() { for (const t of new Set(items.map(i => i.type))) if (t.startsWith('asset:')) this.refreshType(t) },
-  assetsChanged() { buildSurfaces(); reflow(); surfaceUI() },
-})
+  assetsChanged() { refreshSlots(); buildSurfaces(); reflow(); surfaceUI(); tplUI() },
+  slotCat(fileName) { const k = String(fileName).toLowerCase().replace(/\.[a-z0-9]{2,5}$/, ''); const s = tpl?.slots.find(x => (x.file || x.name).toLowerCase() === k); return s ? s.category || SLOT_CAT[s.target] : null },
+}
+initCloud(app)
 applyAmbience()
 const qs = new URLSearchParams(location.search)
+mergeStarters()
 if (qs.get('room')) { starter(); loadPreset(qs.get('room')) }
 else { const saved = localStorage.getItem(LS) || localStorage.getItem(LS1); if (saved) { try { deserialize(JSON.parse(saved)) } catch { starter() } } else starter() }
 if (qs.has('third')) toggleView()
@@ -805,4 +934,4 @@ renderer.setAnimationLoop(() => {
   if (helper) helper.update()
   renderer.render(scene, camera)
 })
-window.__mysbase = { findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
+window.__mysbase = { tpl: () => tpl, slotStatus, usedAssetIds, slotSpec: () => slotSpec(tpl, slotStatus()), findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
