@@ -614,6 +614,22 @@ for (const [id, k, f] of [['lColor', 'color', v => v], ['lInt', 'intensity', v =
   $(id).oninput = e => { if (sel?.light) { sel.light[k] = f(e.target.value); applyLight(sel) } }
 $('lKind').onchange = e => { if (!sel?.light) return; const t = e.target.value === 'spot' ? 'core:light-spot' : 'core:light-point'
   sel.type = t; sel.light.kind = e.target.value; sel.group.clear(); def(t).build(sel.group); applyLight(sel); refreshSel() }
+// ---------- ceiling images: flat ceiling layer (default) vs hanging panel (round 5) ----------
+const ceilImgSlot = it => { const n = it && def(it.type)?.slot, s = n && slotOf(n); return s?.type === 'image' && it.mount === 'ceiling' ? s : null }
+function setCeilMode(name, mode) {
+  const s = slotOf(name); if (!s || s.type !== 'image') return toast('Only image slots can switch ceiling mode')
+  const key = 'slot:' + name
+  if (mode === 'flat') {
+    for (const it of items.filter(i => i.type === key)) { if (sel === it) select(null); removeItem(it) }
+    s.target = 'ceiling'; s.ceiling = 'flat'; delete s.category
+    const arr = surfaces.ceiling, at = arr.findIndex((L, i) => i > 0 && !L); arr[at > 0 ? at : 1] = { asset: key, offsetM: 0.005, uvScale: [1, 1], color: null }
+    delete CATALOG[key]; applySurfaces(); toast(`⬜ ${name} lies flat on the ceiling`)
+  } else {
+    surfaces.ceiling = surfaces.ceiling.map(L => L?.asset === key ? null : L)
+    s.target = 'ceiling-mount'; s.ceiling = 'hang'; delete s.category; delete CATALOG[key]; applySurfaces()
+    const it = addItem(key); it.mount = 'ceiling'; ceilingPose(it, 0, 0); resolve(it); select(it); toast(`🪧 ${name} hangs from the ceiling (move it to split the room)`)
+  }
+}
 function onWhat(it) {
   if (it.pending) return 'not placed yet — tap a wall (ghost preview)'
   if (it.unresolved) return 'placeholder — asset not loaded (connect + sign in)'
@@ -630,7 +646,7 @@ function refreshSel() {
   const d = def(sel.type), p = sel.group.position
   $('selName').textContent = d.name + ' #' + sel.id; $('bMove').classList.toggle('on', placing)
   document.querySelectorAll('.wallonly').forEach(b => b.style.display = sel.wall || isLight(sel) || sel.mount === 'free' || sel.mount === 'object' ? '' : 'none')
-  $('lightRow').classList.toggle('hidden', !sel.light)
+  $('lightRow').classList.toggle('hidden', !sel.light); $('ceilRow').classList.toggle('hidden', !ceilImgSlot(sel))
   if (sel.light) { $('lKind').value = sel.light.kind; $('lColor').value = sel.light.color; $('lInt').value = sel.light.intensity; $('lDist').value = sel.light.distance; $('lAng').value = sel.light.angle; $('lAng').disabled = sel.light.kind !== 'spot' }
   $('scale').value = sel.scale; $('scaleVal').textContent = sel.scale === 1 ? '1:1' : '1:' + (1 / sel.scale).toFixed(1).replace(/\.0$/, '')
   const bx = $('presets'); bx.innerHTML = ''
@@ -649,6 +665,7 @@ function refreshSel() {
   $('selInfo').textContent = `${sel.type} · pos ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)} m · rot ${Math.round(sel.group.rotation.y / DEG)}° · ` +
     `${(sz[0] * s).toFixed(2)}×${(sz[2] * s).toFixed(2)} m, ${(sz[1] * s).toFixed(2)} m tall · ${sel.pending ? "" : "on "}${onWhat(sel)}${d.snap ? ' · snap ' + d.snap + ' · ' + d.category : ''}`
 }
+$('bCeilFlat').onclick = () => { const s = ceilImgSlot(sel); if (s) setCeilMode(s.name, 'flat') }
 $('paint').oninput = e => { wallMat.color.set(e.target.value); buildSurfaces() }
 
 // ---------- surfaces UI ----------
@@ -673,7 +690,7 @@ function surfaceUI() {
     r.innerHTML = `<span>Layer ${i + 1}</span><select></select><button>−</button><input type="number" step="0.1" min="0" max="5" style="width:58px"><span class="small">cm</span><button>+</button><span class="small">tile×</span><input type="number" step="0.05" min="0.05" max="20" style="width:58px">`
     const [sl, minus, off, plus, uv] = [r.querySelector('select'), ...r.querySelectorAll('button, input')].filter((_, k, a) => true).slice(0, 5)
     sl.innerHTML = layerOptions(cat).map(([v, t]) => `<option value="${v}">${t}</option>`).join(''); sl.value = L?.asset || ''
-    if (L && ![...sl.options].some(o => o.value === L.asset)) { sl.add(new Option(L.asset + ' (sign in to load)', L.asset)); sl.value = L.asset }
+    if (L && ![...sl.options].some(o => o.value === L.asset)) { sl.add(new Option(L.asset.startsWith('slot:') ? '🧩 ' + L.asset.slice(5) + ' (room kit / template)' : L.asset + ' (sign in to load)', L.asset)); sl.value = L.asset }
     off.value = L ? +(L.offsetM * 100).toFixed(1) : 0; uv.value = L ? L.uvScale[0] : 1; for (const e of [minus, off, plus, uv]) e.disabled = !L
     const set = fn => { const l = arr[i]; if (l) { fn(l); applySurfaces(false) } }
     sl.onchange = () => { arr[i] = sl.value ? { ...(arr[i] || layer(sl.value)), asset: sl.value } : null; applySurfaces() }
@@ -681,6 +698,8 @@ function surfaceUI() {
     minus.onclick = () => bump(-sfStep); plus.onclick = () => bump(sfStep)
     off.onchange = () => set(l => { l.offsetM = Math.max(0, Math.min(MAX_OFFSET, r3(+off.value / 100))); off.value = +(l.offsetM * 100).toFixed(1) })
     uv.onchange = () => set(l => { const v = Math.max(0.05, Math.min(20, +uv.value || 1)); l.uvScale = [v, v] })
+    const ls = face === 'ceiling' && L?.asset?.startsWith('slot:') ? slotOf(L.asset.slice(5)) : null
+    if (ls?.type === 'image') { const h = document.createElement('button'); h.textContent = '🪧 Hang as panel'; h.title = 'Turn this ceiling image into a panel hanging from the ceiling (splits a room)'; h.onclick = () => setCeilMode(ls.name, 'hang'); r.appendChild(h) }
     box.appendChild(r)
   })
   if (isOv) { const b = document.createElement('button'); b.textContent = `Clear ${face} override`; b.onclick = () => { delete surfaces.overrides[face]; applySurfaces() }; box.appendChild(b) }
@@ -936,4 +955,4 @@ renderer.setAnimationLoop(() => {
   if (helper) helper.update()
   renderer.render(scene, camera)
 })
-window.__mysbase = { roomKit, autoLayout, guessTag, tpl: () => tpl, slotStatus, usedAssetIds, slotSpec: () => slotSpec(tpl, slotStatus()), findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
+window.__mysbase = { roomKit, setCeilMode, surfacesNow: () => structuredClone(surfaces), itemsNow: () => items.map(i => ({ type: i.type, mount: i.mount, pos: v3(i.group.position) })), autoLayout, guessTag, tpl: () => tpl, slotStatus, usedAssetIds, slotSpec: () => slotSpec(tpl, slotStatus()), findAsset, allAssets, outerNow: () => ({ ...outer }), importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }

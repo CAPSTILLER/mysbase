@@ -8,6 +8,9 @@ export const TAGS = ['wall-layer', 'floor-layer', 'ceiling-layer', 'wall-mount',
 export const TAG_LABEL = { 'wall-layer': '🧱 wall layer', 'floor-layer': '⬛ floor layer', 'ceiling-layer': '⬜ ceiling layer', 'wall-mount': '🖼 wall-mount', 'ceiling-mount': '💡 ceiling-mount', prop: '🪑 prop', decal: '🏷 decal' }
 export const TAG_TARGET = { 'wall-layer': 'wall', 'floor-layer': 'floor', 'ceiling-layer': 'ceiling', 'wall-mount': 'wall-mount', 'ceiling-mount': 'ceiling-mount', prop: 'placed model', decal: 'decal' }
 const TARGET_TAG = Object.fromEntries(Object.entries(TAG_TARGET).map(([k, v]) => [v, k]))
+/** Images tagged for the ceiling: flat ceiling layer (default) or, with hang, a panel hanging from the ceiling (splits a room). */
+export const isCeilImage = it => it.kind === 'image' && (it.tag === 'ceiling-layer' || it.tag === 'ceiling-mount')
+export const effTag = it => isCeilImage(it) ? (it.hang ? 'ceiling-mount' : 'ceiling-layer') : it.tag
 const ROOM = { w: 5, d: 6, h: 3, wallT: 0.12, door: { w: 0.9, h: 2.1, x: 1.2 }, units: 'm' }
 const r3 = v => Math.round(v * 1000) / 1000
 
@@ -30,10 +33,10 @@ export function imageStats(bmp) {
 export function guessTag({ name, kind, sizeM = [0.5, 0.5, 0.5], stats }) {
   const n = String(name).toLowerCase(), layerish = /pad|tile|layer|panel|paper|texture|brick|plank|wood|carpet|concrete|marble|pattern|seamless/.test(n)
   if (/decal|sticker|graffiti|stencil/.test(n)) return 'decal'
-  if (/ceil/.test(n) && (layerish || kind === 'image')) return 'ceiling-layer'
+  if (/ceil|roof|overhead/.test(n) && (layerish || kind === 'image')) return 'ceiling-layer' // images on the ceiling lie flat by default
   if (/floor|ground|carpet/.test(n) && (layerish || kind === 'image')) return 'floor-layer'
   if (/wall/.test(n) && (layerish || kind === 'image')) return 'wall-layer'
-  if (/light|lamp|chandelier|pendant|ceiling|fan\b|bulb/.test(n)) return 'ceiling-mount'
+  if (kind !== 'image' && /light|lamp|chandelier|pendant|ceiling|fan\b|bulb/.test(n)) return 'ceiling-mount'
   if (/door|window|poster|painting|frame|sign|mirror|clock|tv|screen|shelf|art|photo|print/.test(n)) return 'wall-mount'
   if (kind === 'image') {
     if (stats?.alpha > 0.12) return 'decal'
@@ -51,7 +54,8 @@ export function guessTag({ name, kind, sizeM = [0.5, 0.5, 0.5], stats }) {
 export function autoLayout(items, { name = 'My room', folder } = {}) {
   const W = ROOM.w, D = ROOM.d, H = ROOM.h, DX = ROOM.door.x, notes = {}
   const slots = items.map(it => {
-    const target = TAG_TARGET[it.tag], s = { name: it.name, type: it.kind === 'image' ? 'image' : 'model', target }
+    const target = TAG_TARGET[effTag(it)], s = { name: it.name, type: it.kind === 'image' ? 'image' : 'model', target }
+    if (isCeilImage(it)) s.ceiling = it.hang ? 'hang' : 'flat'
     const z = it.sizeM || [0.6, 0.6, 0.05]
     if (target === 'floor' || target === 'ceiling') s.sizeM = it.kind === 'image' ? [z[0], z[1]] : [z[0], z[2], z[1]]
     else s.sizeM = it.kind === 'image' ? [z[0], z[1]] : [z[0], z[1], z[2]]
@@ -104,7 +108,8 @@ This zip rebuilds the room **${layout.name}** in Mysbase (https://mysbase.gearup
 
 ## Rebuild it
 1. Open Mysbase → **🧰 Room Kit** → **Import kit zip** → pick this zip.
-2. The room appears straight away (preview). Tap **Save** to upload the assets into your
+2. The room appears straight away (preview, kept only in your browser; anyone can do this, no wallet needed).
+   CAPs Mind holders can then tap **Save** to upload the assets into your
    My assets folder "${layout.folder}" (files you already have are not uploaded again) and save the room.
 3. Optional: **Get share code** (anyone can open it) or **Save as starter room** (admins).
 
@@ -158,7 +163,7 @@ async function addFile(name, ext, bytes, preset = {}) {
     it.prep = p; it.kind = p.meta.kind
     if (p.meta.kind === 'image') { it.stats = imageStats(p.image); it.thumb = URL.createObjectURL(p.blobs[p.meta.original.file]); it.sizeM = p.meta.sizeM.slice(0, 2) }
     else { it.sizeM = p.meta.sizeM; if (p.blobs['thumb.png']) it.thumb = URL.createObjectURL(p.blobs['thumb.png']) }
-    if (preset.tag) { it.tag = preset.tag; it.guessed = false } else it.tag = guessTag({ name: it.name, kind: it.kind, sizeM: it.sizeM, stats: it.stats })
+    if (preset.tag) { it.tag = preset.tag; it.guessed = false; it.hang = !!preset.hang } else it.tag = guessTag({ name: it.name, kind: it.kind, sizeM: it.sizeM, stats: it.stats })
     it.tiles = preset.tiles ?? (it.kind === 'image' ? (it.stats.seam < 1.6) : true)
     if (it.kind === 'image') { const w = preset.sizeM?.[0] || (it.tag.endsWith('layer') ? (it.tiles ? 0.6 : 1) : it.tag === 'decal' ? 0.5 : 0.8); setWidth(it, w) }
     it.status = p.meta.needsConverter ? '⚠ ' + (p.meta.note || 'needs converter') : ''
@@ -180,8 +185,8 @@ async function importZip(bytes, zipName) {
   if (z.layout) { // a kit: restore name, tags and the saved layout
     K.name = z.layout.name || zipName.replace(/\.zip$/i, ''); K.layout = z.layout; K.imported = true
     const slotOf = n => (z.layout.slots || []).find(s => slotName(s.file || s.name) === slotName(n))
-    await Promise.all(z.files.map(f => { const s = slotOf(f.name); return addFile(f.name, f.ext, f.bytes, s ? { name: s.file || s.name, tag: s.target === 'decal' ? 'decal' : TARGET_TAG[s.target], tiles: s.tileable, sizeM: s.sizeM } : {}) }))
-    $('rkName').value = K.name; apply(true); A.toast(`✅ Kit "${K.name}" imported: ${z.files.length} files. Tap Save to keep it.`, 4000)
+    await Promise.all(z.files.map(f => { const s = slotOf(f.name); return addFile(f.name, f.ext, f.bytes, s ? { name: s.file || s.name, tag: s.target === 'decal' ? 'decal' : s.type === 'image' && s.target === 'ceiling-mount' ? 'ceiling-layer' : TARGET_TAG[s.target], hang: s.type === 'image' && (s.ceiling === 'hang' || s.target === 'ceiling-mount'), tiles: s.tileable, sizeM: s.sizeM } : {}) }))
+    $('rkName').value = K.name; apply(true); A.toast(`✅ Kit "${K.name}" imported: ${z.files.length} files. ${isGuest() ? 'Preview only, nothing stored on the server.' : 'Tap Save to keep it.'}`, 4000)
   } else {
     if (!K.name) { K.name = zipName.replace(/\.zip$/i, ''); $('rkName').value = K.name }
     await Promise.all(z.files.map(f => addFile(f.name, f.ext, f.bytes)))
@@ -197,15 +202,17 @@ function render() {
       <input class="rkN" value="${esc(it.name)}" aria-label="name">
       <select class="rkT" aria-label="tag">${TAGS.map(t => `<option value="${t}" ${t === it.tag ? 'selected' : ''}>${TAG_LABEL[t]}</option>`).join('')}</select>
       <div class="rkMeta small">${it.guessed ? '<span class="rkG" title="guessed from name/size">auto</span> ' : ''}${esc(it.kind || '')} · ${esc(size)}
-      ${it.kind === 'image' ? `<label>w <input class="rkW" type="number" step="0.05" min="0.05" max="10" value="${it.sizeM?.[0] ?? ''}"> m</label>${it.tag.endsWith('layer') ? `<label><input class="rkTile" type="checkbox" ${it.tiles ? 'checked' : ''}> tiles</label>` : ''}` : ''}
+      ${it.kind === 'image' ? `<label>w <input class="rkW" type="number" step="0.05" min="0.05" max="10" value="${it.sizeM?.[0] ?? ''}"> m</label>${it.tag.endsWith('layer') && !(isCeilImage(it) && it.hang) ? `<label><input class="rkTile" type="checkbox" ${it.tiles ? 'checked' : ''}> tiles</label>` : ''}` : ''}
+      ${isCeilImage(it) ? `<label>Ceiling <select class="rkCeil"><option value="flat" ${it.hang ? '' : 'selected'}>⬜ flat layer</option><option value="hang" ${it.hang ? 'selected' : ''}>🪧 hanging panel</option></select></label>` : ''}
       ${it.note ? `<div class="err">${esc(it.note)}</div>` : ''}${it.status && it.thumb ? `<div>${esc(it.status)}</div>` : ''}</div>
       <button class="rkX" title="Remove">✕</button>`
     c.querySelector('.rkN').onchange = e => { it.name = slotName(e.target.value); dedupe(); render() }
-    c.querySelector('.rkT').onchange = e => { it.tag = e.target.value; it.guessed = false; render() }
+    c.querySelector('.rkT').onchange = e => { it.tag = e.target.value; it.guessed = false; if (it.kind === 'image' && it.tag === 'ceiling-mount') { it.tag = 'ceiling-layer'; A.toast('Ceiling images lie flat as a layer. Pick “hanging panel” to hang it instead') } render() }
+    c.querySelector('.rkCeil')?.addEventListener('change', e => { it.hang = e.target.value === 'hang'; render() })
     c.querySelector('.rkW')?.addEventListener('change', e => { setWidth(it, Math.max(0.05, +e.target.value || 0.5)); render() })
     c.querySelector('.rkTile')?.addEventListener('change', e => { it.tiles = e.target.checked })
     c.querySelector('.rkX').onclick = () => { K.items.splice(K.items.indexOf(it), 1); render() }
-    c.dataset.name = it.name; c.dataset.tag = it.tag
+    c.dataset.name = it.name; c.dataset.tag = it.tag; c.dataset.ceil = isCeilImage(it) ? (it.hang ? 'hang' : 'flat') : ''
     g.appendChild(c)
   }
   const ok = K.items.filter(i => i.prep && !i.prep.meta.needsConverter).length
@@ -215,7 +222,7 @@ function render() {
 function preps() {
   const folder = folderName(K.name)
   return K.items.filter(i => i.prep && !i.prep.meta.needsConverter).map(i => {
-    const cat = SLOT_CAT[TAG_TARGET[i.tag]], m = { ...i.prep.meta, name: i.name, folder, category: cat, wall: cat === 'wall-mount' }
+    const cat = SLOT_CAT[TAG_TARGET[effTag(i)]], m = { ...i.prep.meta, name: i.name, folder, category: cat, wall: cat === 'wall-mount' }
     if (i.kind === 'image') m.sizeM = [i.sizeM[0], i.sizeM[1], 0.02]
     return { meta: m, blobs: i.prep.blobs, item: i }
   })
@@ -226,16 +233,17 @@ function apply(keepLayout = false) {
   cloud.setLocalAssets(P)
   let layout
   if (keepLayout && K.layout) { layout = { ...K.layout, name: K.name, folder: folderName(K.name) }; for (const s of layout.slots || []) delete s.folder }
-  else { const r = autoLayout(P.map(p => ({ name: p.item.name, tag: p.item.tag, kind: p.item.kind, sizeM: p.item.sizeM, tiles: p.item.tiles })), { name: K.name }); layout = r.layout; for (const it of K.items) it.note = r.notes[it.name] || '' }
+  else { const r = autoLayout(P.map(p => ({ name: p.item.name, tag: p.item.tag, hang: p.item.hang, kind: p.item.kind, sizeM: p.item.sizeM, tiles: p.item.tiles })), { name: K.name }); layout = r.layout; for (const it of K.items) it.note = r.notes[it.name] || '' }
   A.deserialize(layout); K.laid = true; K.layout = layout
   const sel = $('roomSel'); let o = sel.querySelector('option[value="__kit"]'); if (!o) { o = document.createElement('option'); o.value = '__kit'; sel.appendChild(o) }
   o.textContent = `🧰 ${K.name} (Room Kit)`; sel.value = '__kit'
   close(); $('rkBar').classList.remove('hidden'); render()
-  A.toast(`🧰 ${K.name}: ${P.length} assets laid out (preview, not saved). Tweak in Dev mode, then Save.`, 3800)
+  guestUI(); A.toast(`🧰 ${K.name}: ${P.length} assets laid out (preview, not saved). Tweak in Dev mode, then ${isGuest() ? 'Export your kit zip to keep it' : 'Save'}.`, 3800)
 }
 async function save() {
   const out = $('rkOut'); out.classList.remove('hidden')
   try {
+    if (isGuest()) { await holderSignIn(); if (isGuest()) { out.classList.add('hidden'); return } }
     if (!K.laid) apply()
     const P = preps(), folder = folderName(K.name), slug = roomSlug(K.name)
     await cloud.ensureWallet()
@@ -272,7 +280,25 @@ async function exportZip() {
     return { zip, missing }
   } catch (e) { A.toast('❌ ' + (e?.message || e)) }
 }
-function open() { $('rk').classList.remove('hidden'); render() }
+// ---------- guest mode: anyone can build, preview, export and re-import locally; server saves stay holder-only ----------
+// Files stay in this browser tab (memory, blob: URLs); nothing goes to the server until a holder taps Save.
+export const isGuest = () => !cloud.signedIn()
+function guestUI() {
+  const g = isGuest(); document.body.classList.toggle('guest', g)
+  const n = $('rkGuest'); if (n) n.classList.toggle('hidden', !g)
+}
+async function holderSignIn() {
+  try { await cloud.ensureWallet(); await cloud.whoAmI() } catch (e) {
+    A.toast(`Saving to the server is for CAPs Mind holders for now. Export your kit zip to keep this room. (${e?.shortMessage || e?.message || e})`, 5000)
+  }
+  guestUI()
+}
+/** TODO(submit-kit): future "Submit kit" flow. Anyone sends their exported kit zip (+ name/contact) to a review
+ *  queue; Cap approves it and it is added for everyone (e.g. as a starter room). Needs a new My Wally route
+ *  (e.g. POST /api/rocks/mysbase-kit-submit, size-limited, rate-limited) and an admin review list. Not built yet. */
+export async function submitKit(/* zip, { name, contact } */) { throw new Error('Kit submissions are not open yet. Export your kit zip to keep this room.') }
+
+function open() { $('rk').classList.remove('hidden'); render(); guestUI() }
 function close() { $('rk').classList.add('hidden') }
 function reset() { K.items = []; K.name = ''; K.laid = false; K.layout = null; K.imported = false; $('rkName').value = ''; render() }
 
@@ -285,10 +311,11 @@ export function initRoomKit(app) {
   <div class="row"><button id="rkAdd" class="pri">＋ Add files</button><button id="rkImport">Import kit zip</button><button id="rkReset">Clear</button><span id="rkCount" class="small"></span></div>
   <input id="rkFiles" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.glb,.gltf,.obj,.stl,.ply,.fbx,.usdz,.zip" hidden>
   <div id="rkGrid"></div>
-  <div class="row rkActions"><button id="rkLayout" class="pri">✨ Auto-layout</button><button id="rkSave">💾 Save</button><button id="rkExport">⬇ Export kit zip</button></div>
+  <div class="row rkActions"><button id="rkLayout" class="pri">✨ Auto-layout</button><button id="rkSave" class="srvOnly">💾 Save</button><button id="rkExport">⬇ Export kit zip</button></div>
+  <div id="rkGuest" class="small rkGuest hidden">👋 Guest mode: everything stays in this browser. <b>Export your kit zip to keep this room</b>, then Import kit zip to see it again. <button id="rkHolder">🔑 CAPs Mind holder? Sign in to save</button></div>
   <div class="small">Tags are guessed from the name, picture and size; change any that are wrong. Auto-layout fills the 5×6×3 m room; tweak it in Dev mode, then Save uploads everything into a folder named after the room.</div>
 </div></div>
-<div id="rkBar" class="hidden"><b>🧰</b><button id="rkBack">Kit</button><button id="rkSave2" class="pri">💾 Save</button><button id="rkExport2">⬇ Zip</button></div>
+<div id="rkBar" class="hidden"><b>🧰</b><button id="rkBack">Kit</button><button id="rkSave2" class="pri srvOnly">💾 Save</button><button id="rkExport2">⬇ Zip</button></div>
 <div id="rkOut" class="hidden"></div>`)
   $('top').insertBefore(Object.assign(document.createElement('button'), { id: 'bKit', textContent: '🧰 Room Kit', onclick: open }), $('roomSel'))
   $('rkClose').onclick = close; $('rkBack').onclick = open
@@ -303,6 +330,9 @@ export function initRoomKit(app) {
   box.addEventListener('dragover', e => { e.preventDefault(); box.classList.add('drag') })
   box.addEventListener('dragleave', () => box.classList.remove('drag'))
   box.addEventListener('drop', e => { e.preventDefault(); box.classList.remove('drag'); addFiles([...e.dataTransfer.files]) })
+  $('rkHolder').onclick = holderSignIn
+  for (const id of ['bSaveSrv', 'bLoadSrv', 'roomId', 'roomVer', 'bShare', 'starterRow']) $(id)?.classList.add('srvOnly') // server-only: hidden for guests
+  guestUI(); setInterval(guestUI, 1500)
   if (new URLSearchParams(location.search).has('kit')) open()
-  return { open, close, state: K, addFiles, apply, save, exportZip, importZip }
+  return { open, close, state: K, addFiles, apply, save, exportZip, importZip, isGuest, submitKit }
 }

@@ -12,6 +12,7 @@ export function normSlot(s) {
   if (z[2] != null && Number.isFinite(+z[2])) out.sizeM.push(Math.max(0, Math.min(+z[2], 50)))
   for (const k of ['folder', 'file', 'category', 'note', 'prompt']) if (s[k] != null && s[k] !== '') out[k] = String(s[k]).slice(0, 400)
   if (s.alpha != null) out.alpha = !!s.alpha
+  if (s.ceiling === 'flat' || s.ceiling === 'hang') out.ceiling = s.ceiling // image on the ceiling: flat layer (default) or hanging panel
   if (s.implicit) out.implicit = true
   return out
 }

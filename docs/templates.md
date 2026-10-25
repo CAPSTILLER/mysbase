@@ -120,3 +120,8 @@ Build a whole room from a pile of files, no JSON, no IDs.
    then saves the room to the server by asset name. Then optionally **Get share code** or (admin) **Save as starter room**
    (asks before making those assets public).
 6. **Export kit zip** = `assets/*` + `room.json` + `README.md`. **Import kit zip** rebuilds the room; Save uploads only missing assets.
+
+## Round 5
+- **Ceiling images**: images tagged ceiling default to a FLAT ceiling surface layer (first free ceiling slot), tiled/stretched over the whole ceiling. Per-item choice "⬜ flat layer" / "🪧 hanging panel" in Room Kit cards; in Dev mode use "🪧 Hang as panel" (layer panel) or "⬜ Lay flat as ceiling layer" (selected item). Saved as `slot.ceiling: 'flat'|'hang'` in room JSON / kit zip.
+- **Guest mode**: visitors without a holder session can build, auto-layout, Dev-tweak, preview, Export and Import kit zips entirely in the browser. Server-only controls (`.srvOnly`) are hidden for guests. Holders tap "Sign in to save".
+- **TODO(submit-kit)**: `submitKit()` stub in src/roomkit.js, intended for a future `POST /api/rocks/mysbase-kit-submit` plus admin approval.
