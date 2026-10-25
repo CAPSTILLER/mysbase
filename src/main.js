@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
-import { initCloud, assetType, assetMetas, layerSource } from './cloud.js'
+import { initCloud, assetType, assetMetas, layerSource, ensureAssets, snapOfMeta } from './cloud.js'
 import { LAYERS, layerParts, buildVaultDoor, buildTally, buildWindow } from './builtins.js'
 
 // ---------- SIZE KEY (1 unit = 1 m) ----------
@@ -210,12 +210,15 @@ let items = [] // {id,type,group,preset,scale,parent,wall,face,allowed,light?,pe
 let presets = [{ name: 'Tabletop', ratio: 0.1 }]
 let nextId = 1
 const isLight = it => !!def(it.type).light
-const solid = it => !it.wall && !it.pending && !isLight(it)
+const WALL_SIDES = { back: 0, front: 180, left: 90, right: -90 } // yaw offset so that local side faces into the wall
+const snapOf = it => { const d = def(it.type); return d.snap || (d.wallOnly ? 'back' : d.light ? 'center' : 'bottom') }
+const floating = it => it.mount === 'ceiling' || it.mount === 'free' || it.mount === 'object'
+const solid = it => !it.wall && !it.pending && !isLight(it) && !floating(it) && !it.unresolved
 function topOf(it) { return it.group.position.y + def(it.type).top * it.scale }
 function addItem(type, opts = {}) {
   const d = def(type), g = new THREE.Group(); d.build(g)
   g.traverse(o => { if (o.isMesh && !o.userData.bulb) o.castShadow = o.receiveShadow = true })
-  const it = { id: opts.id ?? nextId++, type, group: g, preset: null, scale: 1, parent: null, wall: false, face: null,
+  const it = { id: opts.id ?? nextId++, type, group: g, preset: null, scale: 1, parent: null, wall: false, face: null, mount: null, unresolved: !!d.unresolved,
     allowed: opts.allowed ?? [...(d.presets || d.allowedPresets || [])] }
   if (d.light) { it.light = { kind: d.light, color: '#ffe8c4', intensity: 3, distance: 6, angle: 45, penumbra: 0.4, ...(opts.light || {}) }; applyLight(it) }
   nextId = Math.max(nextId, it.id + 1)
@@ -238,7 +241,7 @@ function footprintHas(it, x, z) { const b = ibox(it); return x >= b.min.x && x <
 function descendants(it) { const out = []; for (const o of items) if (o.parent === it.id) out.push(o, ...descendants(o)); return out }
 function ancestors(it) { const out = []; let p = it.parent; while (p != null) { const o = items.find(i => i.id === p); if (!o || out.includes(o)) break; out.push(o); p = o.parent } return out }
 function drop(it) {
-  if (it.wall || isLight(it)) return
+  if (it.wall || isLight(it) || floating(it) || it.unresolved) return
   const bottom = it.group.position.y, p = it.group.position, ex = new Set([it, ...descendants(it)])
   let best = bounds().y0, parent = null
   for (const o of items) {
@@ -285,8 +288,11 @@ function rotate(it, deg) {
 }
 // put an item flat against a wall face at a hit point (respects the outermost surface layer)
 function wallPose(it, face, pt, mount) {
-  const d = def(it.type), F = FACES[face], n = F.n, dep = (d.size[2] || 0.3) * it.scale / 2, B = bounds(), h = d.size[1] * it.scale
-  it.group.rotation.y = Math.atan2(n.x, n.z)
+  const d = def(it.type), F = FACES[face], n = F.n, B = bounds(), h = d.size[1] * it.scale
+  const side = mount && WALL_SIDES[snapOf(it)] !== undefined ? snapOf(it) : 'back'
+  it.group.rotation.y = Math.atan2(n.x, n.z) + WALL_SIDES[side] * DEG
+  const lb = new THREE.Box3().setFromObject(it.group), gp = it.group.position // extent behind the pivot along -n (real bbox, any snap side)
+  const dep = side === 'back' && !d.snap ? (d.size[2] || 0.3) * it.scale / 2 : Math.max(0.001, -((n.x ? (n.x > 0 ? lb.min.x - gp.x : -(lb.max.x - gp.x)) : (n.z > 0 ? lb.min.z - gp.z : -(lb.max.z - gp.z)))))
   let y = mount ? Math.max(B.y0, Math.min(B.y1 - h, pt.y - h / 2)) : it.group.position.y
   if (isLight(it)) y = Math.max(B.y0, Math.min(B.y1 - h, pt.y))
   it.group.position.y = y
@@ -295,14 +301,54 @@ function wallPose(it, face, pt, mount) {
   if (n.x) x = F.o.x + n.x * off; if (n.z) z = F.o.z + n.z * off
   moveTo(it, x, y, z); it.group.position.set(it.group.position.x, y, it.group.position.z)
 }
+// hang flush from the ceiling (top snap): bbox top touches the outermost ceiling layer at x/z
+function ceilingPose(it, x, z, y1 = bounds().y1) {
+  it.wall = false; it.face = null; it.parent = null; it.mount = 'ceiling'
+  ;[x, z] = clampRoom(x, z, it); moveTo(it, x, it.group.position.y, z)
+  const b = ibox(it), up = b.max.y - it.group.position.y
+  it.group.position.y = r3(y1 - up)
+}
+// lock the snap side flush onto any surface (object faces, free placement). n = axis-aligned surface normal.
+function surfacePose(it, pt, n) {
+  const side = snapOf(it)
+  if (WALL_SIDES[side] !== undefined && Math.abs(n.y) < 0.5) it.group.rotation.y = Math.atan2(n.x, n.z) + WALL_SIDES[side] * DEG
+  const p = it.group.position; p.copy(pt); it.group.updateMatrixWorld(true)
+  const b = ibox(it), c = b.getCenter(V())
+  if (side === 'center') { p.add(pt.clone().sub(c)) } // bbox centre on the clicked point
+  else {
+    const ext = n.x > 0 ? b.min.x : n.x < 0 ? b.max.x : n.y > 0 ? b.min.y : n.y < 0 ? b.max.y : n.z > 0 ? b.min.z : b.max.z
+    const comp = n.x ? 'x' : n.y ? 'y' : 'z'
+    const sh = pt.clone().sub(c); sh[comp] = pt[comp] - ext + Math.sign(n[comp]) * 0.001; p.add(sh)
+  }
+  p.set(snap(p.x), r3(p.y), snap(p.z))
+}
+const axisN = v => { const a = [Math.abs(v.x), Math.abs(v.y), Math.abs(v.z)], i = a.indexOf(Math.max(...a)), o = V(0, 0, 0); o.setComponent(i, Math.sign(v.getComponent(i))); return o }
 function placeAt(it, hit, preview = false) {
   const kind = hit.object.userData.kind, d = def(it.type)
+  if (it.unresolved) { if (!preview) toast('Asset not loaded yet — connect + sign in first'); return false }
+  const side = snapOf(it)
+  if (d.ceilOnly || side === 'top') { // ceiling mounts: ceiling, or the underside of an object
+    if (kind === 'ceiling') { ceilingPose(it, hit.point.x, hit.point.z); return true }
+    if (kind === 'item' && !preview) { const o = hit.object.userData.itemRef, nn = axisN(hit.face.normal.clone().transformDirection(hit.object.matrixWorld))
+      if (o !== it && nn.y < 0) { it.wall = false; it.face = null; it.parent = null; surfacePose(it, hit.point, nn); it.mount = 'object'; return true } }
+    if (!preview) toast(`${d.name}: tap the ceiling`); return false
+  }
+  if (side === 'center' && !isLight(it)) { // free: centre on the clicked point, height kept
+    if (preview) return false
+    const nn = kind === 'item' ? axisN(hit.face.normal.clone().transformDirection(hit.object.matrixWorld)) : kind === 'wall' ? FACES[hit.object.userData.face].n : kind === 'ceiling' ? V(0, -1, 0) : V(0, 1, 0)
+    it.wall = false; it.face = null; it.parent = null; it.mount = 'free'; surfacePose(it, hit.point, nn); return true
+  }
+  if (d.wallOnly && kind === 'item' && !preview) { // wall snap onto an object's vertical face
+    const o = hit.object.userData.itemRef, nn = axisN(hit.face.normal.clone().transformDirection(hit.object.matrixWorld))
+    if (o !== it && Math.abs(nn.y) < 0.5) { it.wall = false; it.face = null; it.parent = null; it.mount = 'object'; surfacePose(it, hit.point, nn); return true }
+  }
+  it.mount = null
   if (kind === 'wall') {
     for (const o of descendants(it)) o.parent = null
     const mount = !!d.wallOnly || isLight(it)
     wallPose(it, hit.object.userData.face, hit.point, mount)
     if (preview) return true
-    it.wall = mount; it.face = mount ? hit.object.userData.face : null; it.parent = null
+    it.wall = mount; it.face = mount ? hit.object.userData.face : null; it.parent = null; it.mount = mount ? 'wall' : null
     if (isLight(it)) applyLight(it)
     if (!mount) { it.group.position.y = bounds().y0; resolve(it) }
     return true
@@ -329,11 +375,13 @@ function placeAt(it, hit, preview = false) {
 // re-seat everything after surface layers change
 function reflow() {
   for (const it of items) {
-    if (it.pending) continue
+    if (it.pending || it.unresolved) continue // placeholders keep their imported pose until the asset loads
+    if (it.mount === 'ceiling') { ceilingPose(it, it.group.position.x, it.group.position.z); continue }
+    if (floating(it)) continue
     if (it.wall && it.face) { const p = it.group.position; wallPose(it, it.face, V(p.x, p.y + def(it.type).size[1] * it.scale / 2, p.z), true); if (isLight(it)) it.group.position.y = p.y }
     else if (!isLight(it) && it.parent == null) { const p = it.group.position; const [x, z] = clampRoom(p.x, p.z, it); moveTo(it, x, bounds().y0, z) }
   }
-  for (const it of items) if (!it.wall && !isLight(it) && it.parent != null) { const o = items.find(i => i.id === it.parent); if (o) moveTo(it, it.group.position.x, topOf(o), it.group.position.z) }
+  for (const it of items) if (!it.wall && !isLight(it) && !floating(it) && !it.unresolved && it.parent != null) { const o = items.find(i => i.id === it.parent); if (o) moveTo(it, it.group.position.x, topOf(o), it.group.position.z) }
   for (const it of items) resolve(it)
   if (sel) refreshSel()
 }
@@ -427,10 +475,10 @@ function castFrom(cx, cy, targets) { ray.setFromCamera(new THREE.Vector2(cx / in
 function pickAt(cx, cy) {
   const targets = [...pickables]
   for (const it of items) it.group.traverse(o => { if (o.isMesh) { o.userData.kind = 'item'; o.userData.itemRef = it; targets.push(o) } })
-  const hits = (placing && sel?.pending) ? castFrom(cx, cy, walls) : castFrom(cx, cy, targets).filter(h => !(placing && sel && h.object.userData.itemRef === sel))
-  const hit = hits[0]; if (!hit) { if (placing && sel?.pending) toast('Tap a wall to hang it'); return }
+  const hits = (placing && sel?.pending) ? castFrom(cx, cy, def(sel.type).ceilOnly ? [ceil] : walls) : castFrom(cx, cy, targets).filter(h => !(placing && sel && h.object.userData.itemRef === sel))
+  const hit = hits[0]; if (!hit) { if (placing && sel?.pending) toast(def(sel.type).ceilOnly ? 'Tap the ceiling to hang it' : 'Tap a wall to hang it'); return }
   if (placing && sel) {
-    if (placeAt(sel, hit)) { const was = sel.pending; if (was) { sel.pending = false; setGhost(sel, false) } placing = false; refreshSel(); toast(sel.wall ? `Placed on the ${sel.face} wall` : 'Placed') }
+    if (placeAt(sel, hit)) { const was = sel.pending; if (was) { sel.pending = false; setGhost(sel, false) } placing = false; refreshSel(); toast(sel.wall ? `Placed on the ${sel.face} wall` : sel.mount === 'ceiling' ? 'Hung from the ceiling' : 'Placed') }
     return
   }
   if (hit.object.userData.kind === 'item') select(hit.object.userData.itemRef); else select(null)
@@ -466,10 +514,11 @@ function spawn(k) {
   if (sel?.pending) { const p = sel; sel = null; removeItem(p) }
   const it = addItem(k), f = V(Math.sin(player.yaw), 0, Math.cos(player.yaw))
   it.group.rotation.y = Math.round((player.yaw + Math.PI) / DEG) * DEG
-  if (d.wallOnly) { // ghost until a wall is tapped
-    it.pending = true; setGhost(it, true); moveTo(it, player.pos.x + f.x * 1.5, 1.2, player.pos.z + f.z * 1.5)
-    select(it); placing = true; toast('Ghost preview — tap a wall to hang it'); return
+  if (d.wallOnly || d.ceilOnly) { // ghost until a wall / the ceiling is tapped
+    it.pending = true; setGhost(it, true); moveTo(it, player.pos.x + f.x * 1.5, d.ceilOnly ? bounds().y1 - d.size[1] : 1.2, player.pos.z + f.z * 1.5)
+    select(it); placing = true; toast(d.ceilOnly ? 'Ghost preview — tap the ceiling to hang it' : 'Ghost preview — tap a wall to hang it'); return
   }
+  if (d.free) { const [x, z] = clampRoom(player.pos.x + f.x * 1.5, player.pos.z + f.z * 1.5, it); it.mount = 'free'; moveTo(it, x, 1.0, z); select(it); placing = true; toast('Tap any surface: its centre goes there'); return }
   const [x, z] = clampRoom(player.pos.x + f.x * 1.5, player.pos.z + f.z * 1.5, it)
   moveTo(it, x, d.light ? bounds().y1 - 0.3 : bounds().y0, z); if (d.light) applyLight(it); else resolve(it)
   select(it); placing = true; toast(d.light ? 'Tap the ceiling, a wall or the floor to place the light' : 'Tap a spot to place it')
@@ -487,11 +536,13 @@ document.querySelectorAll('.step').forEach(b => b.onclick = () => { step = +b.da
 document.querySelectorAll('[data-n]').forEach(b => b.onclick = () => {
   if (!sel || sel.pending) return; const p = sel.group.position, n = b.dataset.n, s = n[1] === '+' ? step : -step, B = bounds()
   let x = p.x, y = p.y, z = p.z; if (n[0] === 'x') x += s; if (n[0] === 'z') z += s; if (n[0] === 'y') y = Math.max(B.y0, Math.min(B.y1 - 0.1, y + s))
-  if (sel.wall || isLight(sel)) { moveTo(sel, x, y, z); if (sel.wall && sel.face) wallPose(sel, sel.face, V(sel.group.position.x, sel.group.position.y + def(sel.type).size[1] * sel.scale / 2, sel.group.position.z), true) }
+  if (sel.mount === 'ceiling') { ceilingPose(sel, x, z) }
+  else if (floating(sel)) { moveTo(sel, x, y, z); sel.group.position.y = r3(y) }
+  else if (sel.wall || isLight(sel)) { moveTo(sel, x, y, z); if (sel.wall && sel.face) wallPose(sel, sel.face, V(sel.group.position.x, sel.group.position.y + def(sel.type).size[1] * sel.scale / 2, sel.group.position.z), true) }
   else { [x, z] = clampRoom(x, z, sel); moveTo(sel, x, p.y, z); sel.group.position.y += 5; drop(sel); resolve(sel) }
   refreshSel()
 })
-document.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { if (sel && !sel.wall) { rotate(sel, +b.dataset.r); resolve(sel); refreshSel() } })
+document.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { if (sel && !sel.wall && sel.mount !== 'object') { rotate(sel, +b.dataset.r); if (sel.mount === 'ceiling') ceilingPose(sel, sel.group.position.x, sel.group.position.z); resolve(sel); refreshSel() } })
 $('bMove').onclick = () => { if (sel) { placing = !placing; refreshSel(); if (placing) toast('Tap a floor, a surface or a wall') } }
 $('bDel').onclick = delSel; $('bDesel').onclick = () => select(null)
 function applyScale(it, s, presetName) {
@@ -512,7 +563,11 @@ $('lKind').onchange = e => { if (!sel?.light) return; const t = e.target.value =
   sel.type = t; sel.light.kind = e.target.value; sel.group.clear(); def(t).build(sel.group); applyLight(sel); refreshSel() }
 function onWhat(it) {
   if (it.pending) return 'not placed yet — tap a wall (ghost preview)'
+  if (it.unresolved) return 'placeholder — asset not loaded (connect + sign in)'
   if (it.wall) return `${it.face || ''} wall`
+  if (it.mount === 'ceiling') return 'ceiling'
+  if (it.mount === 'free') return 'free (stays where put)'
+  if (it.mount === 'object') return 'side of an object'
   if (isLight(it)) return 'free-floating light'
   return it.parent ? def(items.find(o => o.id === it.parent)?.type)?.name ?? 'floor' : 'floor'
 }
@@ -521,7 +576,7 @@ function refreshSel() {
   if (helper) helper.update()
   const d = def(sel.type), p = sel.group.position
   $('selName').textContent = d.name + ' #' + sel.id; $('bMove').classList.toggle('on', placing)
-  document.querySelectorAll('.wallonly').forEach(b => b.style.display = sel.wall || isLight(sel) ? '' : 'none')
+  document.querySelectorAll('.wallonly').forEach(b => b.style.display = sel.wall || isLight(sel) || sel.mount === 'free' || sel.mount === 'object' ? '' : 'none')
   $('lightRow').classList.toggle('hidden', !sel.light)
   if (sel.light) { $('lKind').value = sel.light.kind; $('lColor').value = sel.light.color; $('lInt').value = sel.light.intensity; $('lDist').value = sel.light.distance; $('lAng').value = sel.light.angle; $('lAng').disabled = sel.light.kind !== 'spot' }
   $('scale').value = sel.scale; $('scaleVal').textContent = sel.scale === 1 ? '1:1' : '1:' + (1 / sel.scale).toFixed(1).replace(/\.0$/, '')
@@ -539,7 +594,7 @@ function refreshSel() {
   }
   const sz = d.size, s = sel.scale
   $('selInfo').textContent = `${sel.type} · pos ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)} m · rot ${Math.round(sel.group.rotation.y / DEG)}° · ` +
-    `${(sz[0] * s).toFixed(2)}×${(sz[2] * s).toFixed(2)} m, ${(sz[1] * s).toFixed(2)} m tall · ${sel.pending ? "" : "on "}${onWhat(sel)}`
+    `${(sz[0] * s).toFixed(2)}×${(sz[2] * s).toFixed(2)} m, ${(sz[1] * s).toFixed(2)} m tall · ${sel.pending ? "" : "on "}${onWhat(sel)}${d.snap ? ' · snap ' + d.snap + ' · ' + d.category : ''}`
 }
 $('paint').oninput = e => { wallMat.color.set(e.target.value); buildSurfaces() }
 
@@ -590,7 +645,8 @@ function serialize() {
   const real = items.filter(it => !it.pending)
   const base = it => ({ id: it.id, typeId: it.type, assetId: it.type.startsWith('asset:') ? it.type.slice(6) : null, name: def(it.type).name, category: def(it.type).category || 'prop',
     pos: v3(it.group.position), rotY: Math.round(it.group.rotation.y / DEG), scale: +it.scale.toFixed(4), preset: it.preset ?? null, parent: it.parent ?? null,
-    wall: !!it.wall, face: it.face ?? null, allowed: [...it.allowed] })
+    wall: !!it.wall, face: it.face ?? null, mount: it.mount ?? (it.wall ? 'wall' : null), allowed: [...it.allowed],
+    ...(it.unresolved && it.src ? { pos: it.src.pos, rotY: it.src.rotY, category: it.src.category, name: it.src.name } : {}) })
   return { version: 2, room: { ...ROOM, door: { ...DOOR }, units: 'm' }, ambience: { ...ambience }, surfaces: structuredClone(surfaces),
     wallPaint: '#' + wallMat.color.getHexString(), presets: structuredClone(presets),
     lights: real.filter(isLight).map(it => ({ ...base(it), kind: it.light.kind, color: it.light.color, intensity: it.light.intensity, distance: it.light.distance, angle: it.light.angle, penumbra: it.light.penumbra })),
@@ -618,11 +674,25 @@ function deserialize(raw) {
     const pr = d.preset && presets.find(p => p.name === d.preset)
     setScale(it, pr ? pr.ratio : d.scale || 1); it.preset = pr ? d.preset : null
     it.group.position.fromArray(d.pos || [0, 0, 0]); it.group.rotation.y = (d.rotY || 0) * DEG; it.parent = d.parent ?? null; it.wall = !!d.wall; it.face = d.face || (d.wall ? guessFace(d.pos) : null)
+    it.mount = ['wall', 'ceiling', 'free', 'object'].includes(d.mount) ? d.mount : it.wall ? 'wall' : null
+    if (!d.mount && !it.wall) { const s = dd.unresolved ? snapOfMeta({ category: d.category }) : dd.snap // old layouts: infer from category / height
+      if (s === 'top' || (dd.unresolved && /ceiling/.test(d.category || '') )) it.mount = 'ceiling'; else if (s === 'center') it.mount = 'free' }
+    if (it.mount === 'wall') it.mount = null // wall pose is carried by wall/face
+    it.src = { pos: [...(d.pos || [0, 0, 0])], rotY: d.rotY || 0, category: d.category, name: d.name, mount: it.mount }
+    if (dd.unresolved && d.name) it.label = d.name
     if (it.light) applyLight(it)
   }
   reflow(); surfaceUI()
   if (skipped) toast(`Skipped ${skipped} light(s): max ${MAX_LIGHTS}`)
   return j
+}
+// an uploaded asset's metadata arrived: put the placeholder back at its imported pose, then seat it with the real model
+function resolvePlaceholder(it) {
+  if (!it.unresolved || def(it.type).unresolved) return
+  it.unresolved = false
+  const s = it.src; if (!s) return
+  it.group.position.fromArray(s.pos); it.group.rotation.y = s.rotY * DEG
+  if (!s.mount && !it.wall) { const sn = def(it.type).snap; it.mount = sn === 'top' ? 'ceiling' : sn === 'center' ? 'free' : null }
 }
 function registry() {
   const out = { version: 1, units: 'm', pivot: 'base centre (y=0 at bottom); front faces +z; wall-mounts hang with +z out of the wall', generatedAt: new Date().toISOString(), types: [], layers: [] }
@@ -630,7 +700,11 @@ function registry() {
   for (const [k, L] of Object.entries(LAYERS)) out.layers.push({ asset: k, name: L.name, categories: L.categories, tileM: L.tileM, source: 'builtin' })
   for (const m of assetMetas()) {
     const e = { typeId: 'asset:' + m.id, assetId: m.id, name: m.name, category: m.category || (m.wall ? 'wall-mount' : 'prop'), boundsM: m.sizeM || null, holds: !!m.holds, wallOnly: !!m.wall, kind: m.kind, needsConverter: !!m.needsConverter, source: 'upload' }
-    if (e.category.endsWith('-layer')) out.layers.push({ asset: e.typeId, assetId: m.id, name: m.name, categories: [e.category], tileM: m.sizeM?.slice(0, 2) || null, kind: m.kind, source: 'upload' }); else out.types.push(e)
+    e.snap = snapOfMeta(m)
+    // tile footprint: floor/ceiling model tiles lie flat, so use X/Z (Y is thickness); wall tiles and images use W×H
+    const flat = m.kind === 'model' && (e.category === 'floor-layer' || e.category === 'ceiling-layer')
+    const tileM = m.sizeM ? (flat ? [m.sizeM[0], m.sizeM[2]] : m.sizeM.slice(0, 2)) : null
+    if (e.category.endsWith('-layer')) out.layers.push({ asset: e.typeId, assetId: m.id, name: m.name, categories: [e.category], tileM, thicknessM: m.kind === 'model' && m.sizeM ? (flat ? m.sizeM[1] : m.sizeM[2]) : null, snap: e.snap, kind: m.kind, source: 'upload' }); else out.types.push(e)
   }
   return out
 }
@@ -646,10 +720,17 @@ $('bExport').onclick = () => { const j = serialize(), t = pretty(j); download('m
 $('bCopy').onclick = () => copy(pretty(serialize()), 'Room JSON')
 $('bPaste').onclick = () => {
   const t = $('ioText').value.trim(); if (!t) return toast('Paste a room JSON into the box first')
-  try { const j = JSON.parse(t); if (!j || typeof j !== 'object' || (!j.items && !j.surfaces)) throw 0; const m = deserialize(j); toast(`✅ Imported (${j.version === 2 ? 'v2' : 'v1 → migrated to v2'}) · ${m.items.length} items`) } catch { toast('❌ That text is not a room layout JSON') }
+  let j; try { j = JSON.parse(t); if (!j || typeof j !== 'object' || (!j.items && !j.surfaces)) throw 0 } catch { return toast('❌ That text is not a room layout JSON') }
+  importLayout(j, `(${j.version === 2 ? 'v2' : 'v1 → migrated to v2'})`)
 }
 $('bImport').onclick = () => $('file').click()
-$('file').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const j = JSON.parse(await f.text()); deserialize(j); toast(`✅ Imported ${f.name}`) } catch { toast('❌ That file is not a room layout') } e.target.value = '' }
+$('file').onchange = async e => { const f = e.target.files[0]; if (!f) return; e.target.value = ''; let j; try { j = JSON.parse(await f.text()) } catch { return toast('❌ That file is not a room layout') } importLayout(j, f.name) }
+// fetch the wallet's My assets list first (like Load from server) so uploads resolve instead of becoming placeholders
+async function importLayout(j, what) {
+  const ok = await ensureAssets(j)
+  try { const m = deserialize(j); const ph = items.filter(i => i.unresolved).length
+    toast(`✅ Imported ${what} · ${m.items.length} items${ph ? ` · ${ph} placeholder(s) until you sign in` : ''}`, ok ? 2200 : 4000) } catch (e) { console.error(e); toast('❌ Could not import that layout') }
+}
 $('bReg').onclick = () => { const t = pretty(registry()); download('mysbase-registry.json', t); $('ioText').value = t; toast('✅ Exported mysbase-registry.json') }
 $('bRegCopy').onclick = () => copy(pretty(registry()), 'Registry JSON')
 $('bClear').onclick = () => { if (confirm('Reset to the starter room? (Saved copy is kept until you Save again)')) starter() }
@@ -689,8 +770,9 @@ initCloud({
   toast, spawn, serialize, deserialize,
   registerType(t) { CATALOG[t] = assetType(t) },
   refreshType(t) {
-    CATALOG[t] = assetType(t)
-    for (const it of items) if (it.type === t) { const gh = it.pending; it.group.clear(); CATALOG[t].build(it.group); it.group.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true }); if (gh) setGhost(it, true) }
+    CATALOG[t] = assetType(t); let touched = false
+    for (const it of items) if (it.type === t) { const gh = it.pending; it.group.clear(); CATALOG[t].build(it.group); it.group.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true }); if (gh) setGhost(it, true); resolvePlaceholder(it); touched = true }
+    if (touched) reflow()
     if (sel) refreshSel()
   },
   rebuildAssets() { for (const t of new Set(items.map(i => i.type))) if (t.startsWith('asset:')) this.refreshType(t) },
@@ -723,4 +805,4 @@ renderer.setAnimationLoop(() => {
   if (helper) helper.update()
   renderer.render(scene, camera)
 })
-window.__mysbase = { serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }
+window.__mysbase = { importLayout, serialize, deserialize, registry, items: () => items, player, outer, spawn, select: id => select(items.find(i => i.id === id) || null), placeAt, pickAt, camera, loadPreset, setYaw: (y, p = 0) => { player.yaw = y; player.pitch = p } }

@@ -21,8 +21,15 @@ const UNITS = { m: 1, cm: 0.01, mm: 0.001, in: 0.0254, ft: 0.3048 }
 const MODEL_EXT = ['glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'usdz'], IMG_EXT = ['png', 'jpg', 'jpeg', 'webp']
 
 let app // hooks from main.js
-const CATS = ['prop','wall-mount','wall-layer','floor-layer','ceiling-layer','light']
-const catSel = def => `<div class="row"><span>Category</span><select id="afCat">${CATS.map(c => `<option ${c === def ? 'selected' : ''}>${c}</option>`).join('')}</select></div>`
+// Placement categories (items) + surface-layer categories. Snap side = which side of the asset locks flush to the target.
+export const CATS = ['prop', 'table-top', 'wall-mount', 'ceiling-mount', 'free', 'wall-layer', 'floor-layer', 'ceiling-layer', 'light']
+export const CAT_LABEL = { prop: 'prop (floor)', 'table-top': 'table-top', 'wall-mount': 'wall-mount', 'ceiling-mount': 'ceiling-mount', free: 'free (stays where put)', 'wall-layer': 'wall layer (tiles)', 'floor-layer': 'floor layer (tiles)', 'ceiling-layer': 'ceiling layer (tiles)', light: 'light' }
+export const SNAPS = ['auto', 'bottom', 'back', 'top', 'front', 'left', 'right', 'center']
+/** Default snap side for a category ('ceiling-layer' placed as an item hangs from the ceiling). */
+export const defaultSnap = c => c === 'wall-mount' || c === 'wall-layer' ? 'back' : c === 'ceiling-mount' || c === 'ceiling-layer' ? 'top' : c === 'free' || c === 'light' ? 'center' : 'bottom'
+export const snapOfMeta = m => (m?.snap && m.snap !== 'auto' ? m.snap : defaultSnap(m?.category || (m?.wall ? 'wall-mount' : 'prop')))
+const opts = (list, cur, lab = {}) => list.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${lab[c] || c}</option>`).join('')
+const catSel = def => `<div class="row"><span>Category</span><select id="afCat">${opts(CATS, def, CAT_LABEL)}</select><span class="small">Snap side</span><select id="afSnap">${opts(SNAPS, 'auto')}</select></div>`
 // ---------- wallet ----------
 const found = new Map()
 addEventListener('eip6963:announceProvider', e => found.set(e.detail.info.uuid, e.detail))
@@ -58,6 +65,9 @@ async function connect() {
   account = accs?.[0] ? getAddress(accs[0]) : null
   provider.on?.('accountsChanged', a => { account = a?.[0] ? getAddress(a[0]) : null; sessionStorage.removeItem('mysbase.session'); paintWallet() })
   paintWallet()
+  // a wallet that already has a valid session (this tab) loads its asset list right away so placeholders resolve
+  const c = JSON.parse(sessionStorage.getItem('mysbase.session') || 'null')
+  if (account && c && c.a === account.toLowerCase() && c.exp > Date.now() / 1000 + 60) refreshAssets()
 }
 
 // ---------- session (same signed-message gate as /backup, action "mysbase") ----------
@@ -95,8 +105,10 @@ const metas = new Map(), templates = new Map(), loading = new Map()
 export function assetType(type) {
   const id = type.slice(6), m = metas.get(id)
   const size = m?.sizeM || [0.5, 0.5, 0.5]
+  const category = m?.category || (m?.wall ? 'wall-mount' : 'prop'), snap = m ? snapOfMeta(m) : null
   return {
-    name: m ? m.name : 'Private asset (connect + sign in)', size, allowedPresets: m?.allowedPresets || [], top: size[1], holds: !!m?.holds, wallOnly: !!m?.wall, asset: id, category: m?.category || (m?.wall ? 'wall-mount' : 'prop'),
+    name: m ? m.name : 'Private asset (connect + sign in)', size, allowedPresets: m?.allowedPresets || [], top: size[1], holds: !!m?.holds, asset: id, category, unresolved: !m,
+    snap, wallOnly: ['back', 'front', 'left', 'right'].includes(snap), ceilOnly: snap === 'top', free: snap === 'center',
     build(g) {
       const t = templates.get(id)
       if (t) { g.add(t.clone(true)); return }
@@ -133,7 +145,15 @@ async function loadTemplate(m) {
 }
 
 // ---------- My assets panel ----------
-async function refreshAssets() {
+let assetsP = null
+/** Fetch the wallet's My assets list once before importing a layout that references uploads. Never throws. */
+export async function ensureAssets(layout) {
+  if (!JSON.stringify(layout || {}).includes('asset:') || metas.size) return true
+  if (!account) { app.toast('Layout uses uploaded assets: connect + sign in to load them (placeholders keep their spots)', 4000); return false }
+  return refreshAssets()
+}
+function refreshAssets() { return assetsP || (assetsP = refreshAssets0().finally(() => { assetsP = null })) }
+async function refreshAssets0() {
   const box = $('assetList'); box.textContent = 'Loading…'
   try {
     const { assets } = await call('mysbase-assets')
@@ -150,10 +170,20 @@ async function refreshAssets() {
       place.onclick = () => { app.spawn('asset:' + a.id); loadTemplate(a).catch(err) }
       const del = document.createElement('button'); del.textContent = 'Delete'
       del.onclick = async () => { if (!confirm(`Delete "${a.name}" from the server? Rooms using it will show a placeholder.`)) return; try { await call('mysbase-asset-delete', { id: a.id }); app.toast('Deleted'); refreshAssets() } catch (e) { err(e) } }
-      row.append(place, del); box.appendChild(row)
+      const cat = document.createElement('select'); cat.innerHTML = opts(CATS, a.category || (a.wall ? 'wall-mount' : 'prop'), CAT_LABEL); cat.title = 'Category'
+      const sn = document.createElement('select'); sn.innerHTML = opts(SNAPS, a.snap || 'auto'); sn.title = 'Snap side (which side locks flush to the wall / table / ceiling)'
+      const saveMeta = async () => {
+        try { const r = await call('mysbase-asset-meta', { id: a.id, category: cat.value, snap: sn.value }); Object.assign(a, r.asset || { category: cat.value, snap: sn.value }); metas.set(a.id, a); app.refreshType('asset:' + a.id); app.assetsChanged?.(); app.toast(`✅ ${a.name}: ${cat.value} · snap ${snapOfMeta(a)}`) }
+        catch (e) { err(e); cat.value = a.category || 'prop'; sn.value = a.snap || 'auto' }
+      }
+      cat.onchange = saveMeta; sn.onchange = saveMeta
+      const meta = document.createElement('span'); meta.className = 'small'; meta.textContent = 'Category'
+      const meta2 = document.createElement('span'); meta2.className = 'small'; meta2.textContent = 'Snap'
+      row.append(place, del, meta, cat, meta2, sn); box.appendChild(row)
     }
     app.rebuildAssets(); app.assetsChanged?.()
-  } catch (e) { box.textContent = ''; err(e) }
+    return true
+  } catch (e) { box.textContent = ''; err(e); return false }
 }
 function measure(obj) { const b = new THREE.Box3().setFromObject(obj); return b.getSize(new THREE.Vector3()) }
 async function parse(ext, buf) {
@@ -191,7 +221,7 @@ async function pick(f) {
     fm.querySelector('#afGo').onclick = () => run(async () => {
       const w = +fm.querySelector('#afW').value || 0.8
       await put(id, origFile, new Blob([buf], { type: f.type || 'image/' + ext }), 'Image')
-      return { id, name: fm.querySelector('#afName').value || name, kind: 'image', sourceFormat: ext, original: { file: origFile, sha256: await sha256(buf) }, sizeM: [w, +(w * aspect).toFixed(3), 0.02], wall: true, category: fm.querySelector('#afCat').value }
+      return { id, name: fm.querySelector('#afName').value || name, kind: 'image', sourceFormat: ext, original: { file: origFile, sha256: await sha256(buf) }, sizeM: [w, +(w * aspect).toFixed(3), 0.02], wall: true, category: fm.querySelector('#afCat').value, snap: fm.querySelector('#afSnap').value }
     })
     return
   }
@@ -237,7 +267,7 @@ async function pick(f) {
     await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original')
     const meta = { id, name: q('#afName').value || name, kind: 'model', sourceFormat: ext, original: { file: origFile, sha256: originalSha },
       sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit: q('#afH').value ? 'custom' : q('#afU').value, scale: s,
-      holds: q('#afHolds').checked, wall: q('#afWall').checked, allowedPresets: q('#afTab').checked ? ['Tabletop'] : [], category: q('#afCat').value }
+      holds: q('#afHolds').checked, wall: q('#afWall').checked, allowedPresets: q('#afTab').checked ? ['Tabletop'] : [], category: q('#afCat').value, snap: q('#afSnap').value }
     if (glb && glb.byteLength <= MAX) {
       await put(id, 'model.glb', new Blob([glb], { type: 'model/gltf-binary' }), 'GLB')
       meta.model = { file: 'model.glb', sha256: await sha256(glb) }
@@ -264,7 +294,7 @@ async function saveServer() {
 async function loadServer(version = 0) {
   try {
     const r = await call('mysbase-room', { roomId: roomId(), version })
-    if (JSON.stringify(r.layout).includes('asset:') && !metas.size) await refreshAssets()
+    await ensureAssets(r.layout)
     app.deserialize(r.layout)
     const h = $('roomVer'); h.innerHTML = r.versions.map(v => `<option value="${v.version}">${v.version ? 'v-' + v.version : 'latest'} · ${new Date(v.savedAt).toLocaleString()}</option>`).join(''); h.value = String(version); h.classList.remove('hidden')
     app.toast(`Loaded "${r.roomId}" from server`)
