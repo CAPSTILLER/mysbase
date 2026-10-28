@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import * as cloud from './cloud.js'
 import { initAvatars } from './avatars.js'
+import { initGenesis } from './genesis.js'
 import { initCloud, assetType, assetMetas, layerSource, ensureAssets, snapOfMeta, findAsset, allAssets } from './cloud.js'
 import { normSlots, slotSpec, SLOT_CAT, implicitSlot } from './slots.js'
 import { LAYERS, layerParts, buildVaultDoor, buildTally, buildWindow } from './builtins.js'
@@ -928,6 +929,7 @@ app = {
 }
 initCloud(app)
 initAvatars(app)
+initGenesis(app)
 const roomKit = initRoomKit({ toast, serialize, deserialize: j => { deserialize(j); tplUI() }, starterAdded: () => mergeStarters() })
 applyAmbience()
 const qs = new URLSearchParams(location.search)

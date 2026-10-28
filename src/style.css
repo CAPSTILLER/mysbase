@@ -19,7 +19,7 @@ body.touch .stick{display:block}
 input,select{font:inherit;padding:5px;border:1px solid #bbb;border-radius:6px;max-width:100%}
 #assetForm{background:#f3f6ff;border-radius:8px;padding:6px;margin:4px 0}
 #assetList .row{border-top:1px solid #eee;padding-top:4px}
-#wpick{position:fixed;inset:auto 8px 8px 8px;max-width:360px;margin:auto;background:#fff;border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;box-shadow:0 4px 20px #0008;z-index:10}
+#wpick{position:fixed;inset:auto 8px 8px 8px;max-width:360px;margin:auto;background:#fff;border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;box-shadow:0 4px 20px #0008;z-index:100}
 @media (max-width:600px){#dev{max-height:calc(100% - 200px)}button{padding:9px 11px}}
 #dev{width:min(560px,calc(100% - 16px))}
 .devhead{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px}
@@ -101,3 +101,13 @@ body.guest .srvOnly { display: none !important; }
 .avCtl{display:flex;align-items:center;gap:8px;padding:4px 10px;background:#fff}.avCtl input[type=range]{flex:1}.avCtl button{min-width:44px;min-height:38px}
 .avTip{font-size:11px;color:#666;text-align:center;background:#fff;padding:0 0 max(6px,env(safe-area-inset-bottom))}
 #avatarStage>.avHead,#avChips,.avCtl,.avTip{flex:0 0 auto}
+#keyPanel{position:fixed;inset:0;z-index:60;background:#f4f5f8;display:flex;flex-direction:column;font:14px system-ui,sans-serif;color:#111}
+#keyPanel.hidden{display:none}
+#keyBody{overflow:auto;padding:12px;flex:1}
+#keyBody h3{margin:12px 0 4px}
+#keyBody button{min-height:44px;font-size:16px;padding:0 16px;border-radius:10px}
+.kCard{background:#fff;border:1px solid #ddd;border-radius:12px;padding:12px;margin:8px 0;display:flex;flex-direction:column;gap:8px}
+.kCard.ready{border-color:#c9a227;box-shadow:0 0 0 2px #c9a22744}
+.kCard.expired{opacity:.75}
+.kReveal{background:#c9a227;color:#111;border:0;font-weight:700}
+#bKey.on{background:#c9a227;color:#111}

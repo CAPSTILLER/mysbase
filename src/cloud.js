@@ -58,6 +58,7 @@ function paintWallet() {
   const b = $('bWallet'); b.textContent = account ? short(account) : 'Connect wallet'
   b.classList.toggle('on', !!account); b.title = account ? 'Connected (read-only). Tap to disconnect.' : 'Connect any wallet. Read-only; you only sign for uploads and saves.'
   $('cloud').classList.toggle('hidden', !account)
+  dispatchEvent(new CustomEvent('mysbase:wallet', { detail: account }))
 }
 async function connect() {
   if (account) { account = null; provider = null; sessionStorage.removeItem('mysbase.session'); paintWallet(); return }
@@ -683,3 +684,6 @@ export async function assetBytes(m) {
 export { MODEL_EXT, IMG_EXT }
 /** Connect a wallet if none is connected yet (Room Kit Save). */
 export async function ensureWallet() { if (!account) await connect(); if (!account) throw new Error('Connect a wallet first') }
+
+/** Connected wallet (read-only until a write is requested). */
+export const wallet = () => ({ provider, account })

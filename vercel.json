@@ -4,5 +4,11 @@
       "source": "/(.*)",
       "destination": "/index.html"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/reveal",
+      "schedule": "0 12 * * *"
+    }
   ]
 }
