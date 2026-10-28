@@ -11,7 +11,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { uploadPresigned } from '@vercel/blob/client'
 import { getAddress } from 'viem'
-import { unzipSync } from 'fflate'
+import { unzipSync, zipSync } from 'fflate'
 
 export const API = (import.meta.env.VITE_MYSBASE_API || 'https://mywally.gearup.wtf').replace(/\/$/, '')
 const MAX = 100 * 1024 * 1024
@@ -408,6 +408,7 @@ export async function prepare(fileName, ext, buf, folder, over = {}) {
   let obj = null, why = '', animations = []
   try { ({ scene: obj, animations } = await parse(ext, buf.slice(0))) } catch (e) { why = e?.message || 'could not read' }
   if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
+  if (!skipPrep && obj && ext === 'glb' && (f.size > PREP_SUGGEST_BYTES || (hasSkin(obj) && animations.length))) return prepOffer(f, buf, hasSkin(obj))
   if (!obj) return { meta: { id, name, folder, kind: 'model', sourceFormat: ext, original, needsConverter: true, note: (ext === 'gltf' ? 'GLTF with external files: zip a .glb instead. ' : '') + why.slice(0, 180) }, blobs: { [origFile]: ob } }
   const raw = measure(obj), unit = raw.y > 50 ? (raw.y > 500 ? 'mm' : 'cm') : 'm', s = UNITS[unit]
   const root = new THREE.Group(); root.add(obj); obj.scale.multiplyScalar(s); obj.updateMatrixWorld(true)
@@ -445,6 +446,35 @@ async function parse(ext, buf) {
   return { scene: new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: geo.hasAttribute('color') ? '#fff' : '#b8b0a4', vertexColors: geo.hasAttribute('color'), roughness: 0.8 })), animations: [] }
 }
 export { parse as parseModel }
+// ---- Avatar Prep (optional, before upload): shrink textures/mesh, seal seam cracks, keep rig + all clips ----
+const PREP_SUGGEST_BYTES = 15 * 1024 * 1024
+const mb = n => (n / 1048576).toFixed(1) + ' MB'
+function prepOffer(f, buf, rigged) {
+  const fm = form(`<b>🛠 Avatar Prep suggested</b> <span class="small">(${mb(f.size)}${rigged ? ', rigged' : ''})</span>
+    <div class="small">Shrinks textures + triangles, seals the seam cracks that open when emotes play, keeps the rig and every emote. Runs on this device.</div>
+    <div class="row"><span>Textures</span><select id="apTex"><option value="2048" selected>2K</option><option value="1024">1K (smaller)</option></select></div>
+    <div class="row"><span>Triangles</span><select id="apRatio"><option value="1">keep all</option><option value="0.5" selected>½ (recommended)</option><option value="0.3">⅓</option></select></div>
+    <div class="row"><label><input type="checkbox" id="apSeal" checked> Seal cracks (seam weights + weld + double-sided)</label></div>
+    <div class="row"><label><input type="checkbox" id="apNorm" checked> Fix scale (≈1.8 m if way off) + feet on floor</label></div>
+    <div class="row"><button id="apGo">Prep</button><button id="apSkip">Skip, upload as is</button><button id="apX">Cancel</button></div><div id="apOut" class="small"></div>`)
+  fm.querySelector('#apX').onclick = closeForm
+  fm.querySelector('#apSkip').onclick = () => pick(f, true).catch(err)
+  fm.querySelector('#apGo').onclick = async () => {
+    const out = fm.querySelector('#apOut'), go = fm.querySelector('#apGo'); go.disabled = true
+    try {
+      const { prepGLB, canvasEncode } = await import('./prep.js') // lazy: only loaded when someone preps
+      const seal = fm.querySelector('#apSeal').checked
+      const r = await prepGLB(new Uint8Array(buf.slice(0)), { texSize: +fm.querySelector('#apTex').value, ratio: +fm.querySelector('#apRatio').value, sealSeams: seal, doubleSided: seal, normalize: fm.querySelector('#apNorm').checked, encodeImage: canvasEncode, onStep: t => { out.textContent = '⏳ ' + t + '…' } })
+      const b = r.before, a = r.after, row = (k, x, y) => `<tr><td>${k}</td><td>${x}</td><td>${y}</td></tr>`
+      out.innerHTML = `<table><tr><th></th><th>before</th><th>after</th></tr>${row('size', mb(b.bytes), mb(a.bytes) + (a.bytes < PREP_SUGGEST_BYTES ? ' ✅' : ' ⚠'))}${row('triangles', b.tris.toLocaleString(), a.tris.toLocaleString())}${row('textures', b.maxTex + 'px', a.maxTex + 'px')}${row('emotes', b.clips, a.clips + (a.clips === b.clips ? ' ✅' : ' ❌'))}</table>
+        ${r.seamFixed ? `<div>Sealed ${r.seamFixed} seam points</div>` : ''}<div class="row"><button id="apUse">Use prepped → upload</button><button id="apZip">Download prepped (.zip)</button></div>`
+      const base = f.name.replace(/\.glb$/i, '') + '_prepped'
+      const pf = new File([r.glb], base + '.glb', { type: 'model/gltf-binary' })
+      fm.querySelector('#apUse').onclick = () => pick(pf, true).catch(err)
+      fm.querySelector('#apZip').onclick = () => { const z = zipSync({ [base + '.glb']: r.glb }, { level: 0 }), u = URL.createObjectURL(new Blob([z], { type: 'application/zip' })); Object.assign(document.createElement('a'), { href: u, download: base + '.zip' }).click(); setTimeout(() => URL.revokeObjectURL(u), 30000) }
+    } catch (e) { out.textContent = '❌ Prep failed: ' + (e?.message || e) + ' — use Skip to upload the original'; go.disabled = false }
+  }
+}
 function form(html) { const f = $('assetForm'); f.innerHTML = html; f.classList.remove('hidden'); return f }
 function closeForm() { const f = $('assetForm'); f.innerHTML = ''; f.classList.add('hidden') }
 async function put(id, file, blob, label, onProg) {
@@ -456,7 +486,7 @@ async function put(id, file, blob, label, onProg) {
     onUploadProgress: p => { if (onProg) return onProg(p.percentage); $('assetProg').value = p.percentage; $('assetProgT').textContent = `${label} ${Math.round(p.percentage)}%` },
   })
 }
-async function pick(f) {
+async function pick(f, skipPrep = false) {
   const ext = (f.name.split('.').pop() || '').toLowerCase()
   if (![...MODEL_EXT, ...IMG_EXT].includes(ext)) return app.toast('Use GLB, GLTF, OBJ, STL, PLY, FBX, USDZ, PNG, JPG or WEBP')
   if (f.size > MAX) return app.toast('Max 100 MB per file')
