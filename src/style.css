@@ -77,3 +77,27 @@ body.guest .srvOnly { display: none !important; }
 .rkGuest { background: #fff6d6; border: 1px solid #f0d58a; border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
 .rkGuest button { margin-top: 4px; }
 .rkCard select.rkCeil { font-size: 12px; }
+
+/* Avatars */
+#avatarsPanel,#avatarStage{position:fixed;inset:0;z-index:60;background:#f4f5f8;display:flex;flex-direction:column;font:14px system-ui,sans-serif;color:#111}
+#avatarsPanel.hidden,#avatarStage.hidden,.avCtl.hidden{display:none}
+#avatarStage{z-index:61;background:#dfe3ea}
+.avHead{display:flex;align-items:center;gap:8px;padding:8px 10px;padding-top:max(8px,env(safe-area-inset-top));background:#fff;border-bottom:1px solid #ddd}
+.avHead b{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.avHead button{min-height:40px;min-width:44px;font-size:16px}
+#avList{overflow:auto;padding:10px;flex:1}
+.avFolder{font-weight:700;color:#2563eb;margin:8px 2px 6px}
+.avGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.avCard{display:flex;flex-direction:column;align-items:stretch;text-align:left;gap:3px;padding:6px;border:1px solid #d6d9e0;border-radius:12px;background:#fff}
+.avCard span{font-size:12px;color:#555}.avBadge{font-style:normal;background:#fde68a;border-radius:6px;padding:0 4px}
+.avThumb{aspect-ratio:1;border-radius:8px;background:#eef0f4 center/cover no-repeat}
+.avEmpty{padding:30px 10px;text-align:center;color:#555}.avOld{margin-top:14px}
+#avCanvasWrap{position:relative;flex:1;min-height:0;touch-action:none}#avCanvasWrap canvas{display:block;position:absolute;inset:0}
+#avLoad{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:700;color:#334}#avLoad.hidden{display:none}
+#avInfo{position:absolute;left:8px;top:6px;font-size:11px;color:#445;background:#fff9;border-radius:6px;padding:2px 6px;pointer-events:none}
+#avChips{display:flex;gap:8px;overflow-x:auto;padding:8px 10px;background:#fff;border-top:1px solid #ddd;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.avChip{flex:0 0 auto;min-height:40px;padding:0 14px;border-radius:20px;border:1px solid #c7ccd6;background:#f4f5f8;font-size:14px;white-space:nowrap;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.avChip.on{background:#2563eb;color:#fff;border-color:#2563eb}
+.avCtl{display:flex;align-items:center;gap:8px;padding:4px 10px;background:#fff}.avCtl input[type=range]{flex:1}.avCtl button{min-width:44px;min-height:38px}
+.avTip{font-size:11px;color:#666;text-align:center;background:#fff;padding:0 0 max(6px,env(safe-area-inset-bottom))}
+#avatarStage>.avHead,#avChips,.avCtl,.avTip{flex:0 0 auto}

@@ -315,7 +315,7 @@ async function saveMeta(a, patch, revert) {
 }
 // thumbnails: stored thumb.png, the image itself, or rendered once from the GLB and saved back (best effort)
 let thumbQ = Promise.resolve()
-function thumbFor(a) {
+export function thumbFor(a) {
   if (thumbs.has(a.id)) return Promise.resolve(thumbs.get(a.id))
   const p = (async () => {
     if (a.thumb) return (await signedUrl(a.id, a.thumb.file)).url

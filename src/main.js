@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import * as cloud from './cloud.js'
+import { initAvatars } from './avatars.js'
 import { initCloud, assetType, assetMetas, layerSource, ensureAssets, snapOfMeta, findAsset, allAssets } from './cloud.js'
 import { normSlots, slotSpec, SLOT_CAT, implicitSlot } from './slots.js'
 import { LAYERS, layerParts, buildVaultDoor, buildTally, buildWindow } from './builtins.js'
@@ -926,6 +927,7 @@ app = {
   slotCat(fileName) { const k = String(fileName).toLowerCase().replace(/\.[a-z0-9]{2,5}$/, ''); const s = tpl?.slots.find(x => (x.file || x.name).toLowerCase() === k); return s ? s.category || SLOT_CAT[s.target] : null },
 }
 initCloud(app)
+initAvatars(app)
 const roomKit = initRoomKit({ toast, serialize, deserialize: j => { deserialize(j); tplUI() }, starterAdded: () => mergeStarters() })
 applyAmbience()
 const qs = new URLSearchParams(location.search)
