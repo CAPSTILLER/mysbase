@@ -167,7 +167,7 @@ async function loadTemplate(m) {
   if (loading.has(m.id)) return loading.get(m.id)
   const p = (async () => {
     let obj
-    const try2 = async fn => { const u = await signedUrl(m.id, m.kind === 'image' ? m.original.file : 'model.glb'); try { return await fn(u.url) } catch { return fn(u.proxy) } }
+    const try2 = async fn => { const u = await signedUrl(m.id, m.kind === 'image' || (m.offset && m.sourceFormat === 'glb') ? m.original.file : 'model.glb') /* rig fast path: model.glb === original bytes; reading original sidesteps any cached pre-fix model.glb */; try { return await fn(u.url) } catch { return fn(u.proxy) } }
     if (m.kind === 'image') {
       const tex = await try2(u => new THREE.TextureLoader().setCrossOrigin('anonymous').loadAsync(u)); tex.colorSpace = THREE.SRGBColorSpace
       const [w, h] = m.sizeM
@@ -592,7 +592,8 @@ export async function fixRig(m) {
   if (m.local) throw new Error('Upload it first')
   await put(m.id, 'model.glb', new Blob([buf], { type: 'model/gltf-binary' }), 'GLB', () => {})
   const patch = { ...m, rig, offset: scene.position.toArray().map(v => +v.toFixed(6)), model: { file: 'model.glb', sha256: await sha256(buf) } }
-  await call('mysbase-asset-save', patch); Object.assign(m, patch); metas.set(m.id, m); templates.delete(m.id); loading.delete(m.id)
+  const res = await call('mysbase-asset-save', patch); Object.assign(m, patch, res?.asset?.id === m.id ? res.asset : {})
+  if (!isRigged(m)) throw new Error('Server did not keep rig info'); metas.set(m.id, m); templates.delete(m.id); loading.delete(m.id)
   return m
 }
 /** Older rigged uploads have no rig meta; probe their original.glb (only the JSON chunk) for skins + animations. */

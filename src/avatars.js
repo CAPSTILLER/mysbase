@@ -95,9 +95,20 @@ function renderList() {
     box.appendChild(d)
   }
 }
+const autoTried = new Set()
+/** One-time, saved repair of older rigged GLB uploads (no rig meta yet). Once saved, they load as avatars everywhere. */
+async function autoFix() {
+  const old = cloud.metasList().filter(m => !m.local && !m.rig && m.sourceFormat === 'glb' && m.original && m.kind === 'model' && !autoTried.has(m.id))
+  let n = 0
+  for (const m of old) {
+    autoTried.add(m.id)
+    try { if (await cloud.probeOriginal(m)) { await cloud.fixRig(m); n++; renderList() } } catch (e) { console.warn('avatar auto-fix', m.name, e) }
+  }
+  if (n) app.toast(`✅ Saved animations for ${n} older avatar${n > 1 ? 's' : ''}`)
+}
 async function openPanel() {
   $('avatarsPanel').classList.remove('hidden'); renderList()
-  if (cloud.signedIn()) { await cloud.refreshAssets(); renderList() }
+  if (cloud.signedIn()) { await cloud.refreshAssets(); renderList(); await autoFix() }
   else if (!listAvatars().length) $('avList').insertAdjacentHTML('beforeend', '<div class="avEmpty small">Sign in (My assets) to see your uploads.</div>')
 }
 
