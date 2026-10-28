@@ -8,6 +8,7 @@ import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { USDZLoader } from 'three/examples/jsm/loaders/USDZLoader.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
+import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { uploadPresigned } from '@vercel/blob/client'
 import { getAddress } from 'viem'
 import { unzipSync } from 'fflate'
@@ -102,7 +103,27 @@ async function call(route, body = {}) {
 const err = e => app.toast('❌ ' + (e?.shortMessage || e?.message || e))
 
 // ---------- asset types in the room catalog ----------
-const metas = new Map(), templates = new Map(), loading = new Map()
+const metas = new Map(), templates = new Map(), loading = new Map(), templAnims = new Map()
+const hasSkin = o => { let k = false; o.traverse(x => { if (x.isSkinnedMesh) k = true }); return k }
+/** Plain clone(true) shares/detaches bones on skinned meshes; SkeletonUtils.clone rebinds them. Static assets keep clone(true). */
+export const cloneObj = o => { if (!hasSkin(o)) return o.clone(true); const c = SkeletonUtils.clone(o); c.traverse(x => { if (x.isSkinnedMesh) x.frustumCulled = false }); return c }
+/** Rig stats for meta.rig: unique skeletons, joints, skinned meshes, clips (with root-motion guess on the hips track). */
+export function rigInfo(obj, animations = [], scale = 1, heightM = 1) {
+  const sk = new Set(), joints = new Set(); let meshes = 0
+  obj.traverse(o => { if (o.isMesh) meshes++; if (o.isSkinnedMesh) { sk.add(o.skeleton); for (const b of o.skeleton.bones) joints.add(b) } }) // meshes: all meshes on the rig (panda_alien: skinned panda + bone-parented alien)
+  if (!sk.size) return null
+  obj.updateMatrixWorld(true)
+  const clips = animations.map(c => {
+    const t = c.tracks.find(t => /hips\.position$/i.test(t.name)); let d = 0
+    if (t && t.values.length >= 6) {
+      const node = obj.getObjectByName(t.name.replace(/\.position$/, '')), ps = node?.parent ? node.parent.getWorldScale(new THREE.Vector3()).x : scale
+      const v = t.values, n = v.length - 3; d = Math.hypot(v[n] - v[0], v[n + 2] - v[2]) * ps
+    }
+    return { name: c.name, duration: +c.duration.toFixed(3), rootMotion: d > 0.25 * heightM }
+  })
+  return { skins: sk.size, joints: joints.size, meshes, clips }
+}
+export const isRigged = m => !!m?.rig && m.rig.skins > 0 && m.rig.clips?.length > 0
 export function assetType(type) {
   const id = type.slice(6), m = metas.get(id)
   const size = m?.sizeM || [0.5, 0.5, 0.5]
@@ -112,7 +133,7 @@ export function assetType(type) {
     snap, wallOnly: ['back', 'front', 'left', 'right'].includes(snap), ceilOnly: snap === 'top', free: snap === 'center',
     build(g) {
       const t = templates.get(id)
-      if (t) { g.add(t.clone(true)); return }
+      if (t) { g.add(cloneObj(t)); return }
       const ph = new THREE.Mesh(new THREE.BoxGeometry(size[0] || 0.5, size[1] || 0.5, size[2] || 0.5), new THREE.MeshStandardMaterial({ color: '#9db4e8', wireframe: true }))
       ph.position.y = (size[1] || 0.5) / 2; g.add(ph)
       if (m) loadTemplate(m).catch(() => {})
@@ -155,7 +176,12 @@ async function loadTemplate(m) {
       pl.position.set(0, h / 2, 0.01); obj.add(pl)
     } else {
       if (!m.model) throw new Error('needs converter')
-      obj = (await try2(u => new GLTFLoader().setCrossOrigin('anonymous').loadAsync(u))).scene
+      const gl = await try2(u => new GLTFLoader().setCrossOrigin('anonymous').loadAsync(u))
+      obj = gl.scene; templAnims.set(m.id, gl.animations || [])
+      if (m.offset) { // rig fast path: model.glb is the untouched original, scale/offset live in meta
+        const g = new THREE.Group(); obj.scale.multiplyScalar(m.scale || 1); obj.position.fromArray(m.offset); g.add(obj); obj = g
+      }
+      obj.traverse(o => { if (o.isSkinnedMesh) o.frustumCulled = false })
     }
     obj.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } })
     templates.set(m.id, obj)
@@ -313,7 +339,7 @@ let snapR = null
 async function snapshot(obj, px = 256) {
   if (!snapR) { snapR = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true }); snapR.setSize(px, px, false); snapR.outputColorSpace = THREE.SRGBColorSpace }
   const sc = new THREE.Scene(); sc.add(new THREE.HemisphereLight('#ffffff', '#8a8a99', 2.2)); const dl = new THREE.DirectionalLight('#fff', 2); dl.position.set(2, 4, 3); sc.add(dl)
-  const o = obj.clone(true); sc.add(o)
+  const o = cloneObj(obj); sc.add(o)
   const b = new THREE.Box3().setFromObject(o), c = b.getCenter(new THREE.Vector3()), r = Math.max(b.getSize(new THREE.Vector3()).length() / 2, 0.01)
   const cam = new THREE.PerspectiveCamera(35, 1, r / 100, r * 100), d = r / Math.sin(17.5 * Math.PI / 180)
   cam.position.copy(c).add(new THREE.Vector3(0.55, 0.45, 1).normalize().multiplyScalar(d)); cam.lookAt(c)
@@ -378,8 +404,8 @@ export async function prepare(fileName, ext, buf, folder, over = {}) {
     const category = (sc || guessCat(name, 'image'))
     return { meta: { id, name, folder, kind: 'image', sourceFormat: ext, original, sizeM: over.sizeM ? [...over.sizeM.slice(0, 2), 0.02] : [w, +(w * img.height / img.width).toFixed(3), 0.02], wall: category === 'wall-mount', category, snap: 'auto', px: [img.width, img.height] }, blobs: { [origFile]: ob }, image: img }
   }
-  let obj = null, why = ''
-  try { obj = await parse(ext, buf.slice(0)) } catch (e) { why = e?.message || 'could not read' }
+  let obj = null, why = '', animations = []
+  try { ({ scene: obj, animations } = await parse(ext, buf.slice(0))) } catch (e) { why = e?.message || 'could not read' }
   if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
   if (!obj) return { meta: { id, name, folder, kind: 'model', sourceFormat: ext, original, needsConverter: true, note: (ext === 'gltf' ? 'GLTF with external files: zip a .glb instead. ' : '') + why.slice(0, 180) }, blobs: { [origFile]: ob } }
   const raw = measure(obj), unit = raw.y > 50 ? (raw.y > 500 ? 'mm' : 'cm') : 'm', s = UNITS[unit]
@@ -390,7 +416,10 @@ export async function prepare(fileName, ext, buf, folder, over = {}) {
   const meta = { id, name, folder, kind: 'model', sourceFormat: ext, original, sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit, scale: s,
     holds: false, wall: category === 'wall-mount', allowedPresets: ['Tabletop'], category, snap: 'auto' }
   const blobs = { [origFile]: ob }
-  let glb = null; try { glb = await new GLTFExporter().parseAsync(root, { binary: true }) } catch (e) { console.warn(e) }
+  const rig = rigInfo(obj, animations, s, sz.y); if (rig) meta.rig = rig
+  let glb = null
+  if (rig && ext === 'glb' && animations.length) { glb = buf; meta.offset = obj.position.toArray().map(v => +v.toFixed(6)) } // rig fast path: keep original bytes
+  else try { glb = await new GLTFExporter().parseAsync(root, { binary: true, animations }) } catch (e) { console.warn(e) }
   if (glb && glb.byteLength <= MAX) {
     blobs['model.glb'] = new Blob([glb], { type: 'model/gltf-binary' }); meta.model = { file: 'model.glb', sha256: await sha256(glb) }
     try { const t = await snapshot(root), tb = await t.arrayBuffer(); blobs['thumb.png'] = new Blob([tb], { type: 'image/png' }); meta.thumb = { file: 'thumb.png', sha256: await sha256(tb) } } catch (e) { console.warn('thumb', e) }
@@ -405,14 +434,16 @@ async function uploadPrepared({ meta, blobs }, prog = () => {}) {
 }
 function measure(obj) { const b = new THREE.Box3().setFromObject(obj); return b.getSize(new THREE.Vector3()) }
 async function parse(ext, buf) {
-  if (ext === 'glb' || ext === 'gltf') return (await new GLTFLoader().parseAsync(ext === 'gltf' ? new TextDecoder().decode(buf) : buf, '')).scene
-  if (ext === 'obj') return new OBJLoader().parse(new TextDecoder().decode(buf))
-  if (ext === 'fbx') return new FBXLoader().parse(buf, '')
-  if (ext === 'usdz') return new USDZLoader().parse(buf)
+  const w = obj => ({ scene: obj, animations: obj.animations || [] })
+  if (ext === 'glb' || ext === 'gltf') { const g = await new GLTFLoader().parseAsync(ext === 'gltf' ? new TextDecoder().decode(buf) : buf, ''); return { scene: g.scene, animations: g.animations || [] } }
+  if (ext === 'obj') return w(new OBJLoader().parse(new TextDecoder().decode(buf)))
+  if (ext === 'fbx') return w(new FBXLoader().parse(buf, ''))
+  if (ext === 'usdz') return w(new USDZLoader().parse(buf))
   const geo = ext === 'stl' ? new STLLoader().parse(buf) : new PLYLoader().parse(buf)
   geo.computeVertexNormals()
-  return new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: geo.hasAttribute('color') ? '#fff' : '#b8b0a4', vertexColors: geo.hasAttribute('color'), roughness: 0.8 }))
+  return { scene: new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: geo.hasAttribute('color') ? '#fff' : '#b8b0a4', vertexColors: geo.hasAttribute('color'), roughness: 0.8 })), animations: [] }
 }
+export { parse as parseModel }
 function form(html) { const f = $('assetForm'); f.innerHTML = html; f.classList.remove('hidden'); return f }
 function closeForm() { const f = $('assetForm'); f.innerHTML = ''; f.classList.add('hidden') }
 async function put(id, file, blob, label, onProg) {
@@ -444,8 +475,8 @@ async function pick(f) {
     })
     return
   }
-  let obj = null, why = ''
-  try { obj = await parse(ext, buf.slice(0)) } catch (e) { why = e?.message || 'could not read' }
+  let obj = null, why = '', animations = []
+  try { ({ scene: obj, animations } = await parse(ext, buf.slice(0))) } catch (e) { why = e?.message || 'could not read' }
   if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
   if (!obj) {
     const fm = form(`<b>${ext.toUpperCase()} can't be converted in the browser (${why}).</b><div class="small">It can be stored as the original only, marked "needs converter" (not placeable yet).</div>
@@ -481,12 +512,15 @@ async function pick(f) {
     const sz = measure(root)
     $('assetProgT').textContent = 'Converting…'
     let glb = null
-    try { glb = await new GLTFExporter().parseAsync(root, { binary: true }) } catch (e) { console.warn(e) }
+    const rig = rigInfo(obj, animations, s, sz.y)
+    if (rig && ext === 'glb' && animations.length) glb = buf // rig fast path (scale/offset in meta)
+    else try { glb = await new GLTFExporter().parseAsync(root, { binary: true, animations }) } catch (e) { console.warn(e) }
     const originalSha = await sha256(buf)
     await put(id, origFile, new Blob([buf], { type: 'application/octet-stream' }), 'Original')
     const meta = { id, name: q('#afName').value || name, kind: 'model', sourceFormat: ext, original: { file: origFile, sha256: originalSha },
       sizeM: [sz.x, sz.y, sz.z].map(v => +v.toFixed(4)), unit: q('#afH').value ? 'custom' : q('#afU').value, scale: s,
       holds: q('#afHolds').checked, wall: q('#afWall').checked, allowedPresets: q('#afTab').checked ? ['Tabletop'] : [], category: q('#afCat').value, snap: q('#afSnap').value }
+    if (rig) { meta.rig = rig; if (glb === buf) meta.offset = obj.position.toArray().map(v => +v.toFixed(6)) }
     if (glb && glb.byteLength <= MAX) {
       await put(id, 'model.glb', new Blob([glb], { type: 'model/gltf-binary' }), 'GLB')
       meta.model = { file: 'model.glb', sha256: await sha256(glb) }
@@ -542,6 +576,34 @@ export function initCloud(hooks) {
 
 // ---------- for main.js: registry + surface layers ----------
 export const assetMetas = () => [...metas.values()]
+export const metasList = () => [...metas.values()].filter(m => m.kind !== 'archive')
+/** Rigged asset for the Avatars viewer: a fresh SkeletonUtils clone of the cached template + its clips. */
+export async function loadRig(m) { const t = await loadTemplate(m); return { scene: cloneObj(t), animations: templAnims.get(m.id) || [] } }
+/** Backfill for rigged GLBs saved before rig meta existed (their model.glb has 0 clips): re-read original.glb, store it as model.glb + rig meta. */
+export async function fixRig(m) {
+  const u = await signedUrl(m.id, m.original.file); let r; try { r = await fetch(u.url) } catch { r = null }
+  if (!r?.ok) r = await fetch(u.proxy); if (!r.ok) throw new Error('HTTP ' + r.status)
+  const buf = await r.arrayBuffer(), { scene, animations } = await parse('glb', buf.slice(0))
+  const s = m.scale || 1, root = new THREE.Group(); root.add(scene); scene.scale.multiplyScalar(s); scene.updateMatrixWorld(true)
+  const b = new THREE.Box3().setFromObject(scene), c = b.getCenter(new THREE.Vector3())
+  scene.position.set(scene.position.x - c.x, scene.position.y - b.min.y, scene.position.z - c.z); root.updateMatrixWorld(true)
+  const rig = rigInfo(scene, animations, s, measure(root).y)
+  if (!rig || !rig.clips.length) throw new Error('No skin + clips in the original')
+  if (m.local) throw new Error('Upload it first')
+  await put(m.id, 'model.glb', new Blob([buf], { type: 'model/gltf-binary' }), 'GLB', () => {})
+  const patch = { ...m, rig, offset: scene.position.toArray().map(v => +v.toFixed(6)), model: { file: 'model.glb', sha256: await sha256(buf) } }
+  await call('mysbase-asset-save', patch); Object.assign(m, patch); metas.set(m.id, m); templates.delete(m.id); loading.delete(m.id)
+  return m
+}
+/** Older rigged uploads have no rig meta; probe their original.glb (only the JSON chunk) for skins + animations. */
+export async function probeOriginal(m) {
+  if (m.sourceFormat !== 'glb' || m.rig || !m.original) return false
+  const u = await signedUrl(m.id, m.original.file); let r; try { r = await fetch(u.url) } catch { r = null }
+  if (!r?.ok) r = await fetch(u.proxy); if (!r.ok) return false
+  const v = new DataView(await r.arrayBuffer()); if (v.getUint32(0, true) !== 0x46546C67) return false
+  const len = v.getUint32(12, true), j = JSON.parse(new TextDecoder().decode(new Uint8Array(v.buffer, 20, len)))
+  return !!(j.skins?.length && j.animations?.length)
+}
 const layerSrc = new Map()
 /** Load an uploaded asset as a surface layer: {kind:'image', tex, sizeM} or {kind:'model', obj}. Needs sign-in. */
 export function layerSource(id) {
