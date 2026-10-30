@@ -660,13 +660,31 @@ export async function whoAmI() { if (!me || me.address.toLowerCase() !== account
 export async function shareLayout(layout, { name, kind, assetIds } = {}) {
   return call('mysbase-share', { layout, name, kind: kind || (layout?.slots ? 'template' : 'room'), assetIds: assetIds || [] })
 }
-/** Admin only: publish as a starter room at ?room=<slug>. */
-export async function saveStarterRoom(slug, layout, { name, assetIds } = {}) {
-  return call('mysbase-starter-save', { slug, name, layout, kind: layout?.slots ? 'template' : 'room', assetIds: assetIds || [] })
+// Admin starter-room changes need a FRESH signature each time (server checks nonce + 5 min expiry + admin wallet).
+function adminMessage({ op, slug, layout, domain, address, nonce, expires }) {
+  return ['Mysbase admin', 'Sign to change a public starter room. Free, no gas, no transaction.',
+    `Action: ${op}`, `Room: ${slug}`, `Layout: ${layout}`, `Domain: ${domain}`, `Address: ${address}`, `Nonce: ${nonce}`, `Expires: ${new Date(expires * 1000).toISOString()}`].join('\n')
 }
+async function adminSig(op, slug, layout = '-') {
+  await session()
+  const nonce = hex(crypto.getRandomValues(new Uint8Array(16)).buffer), expires = Math.floor(Date.now() / 1000) + 240, domain = location.host
+  app.toast(`Sign the free admin message (${op} "${slug}") in your wallet…`)
+  const signature = await provider.request({ method: 'personal_sign', params: [utf8hex(adminMessage({ op, slug, layout, domain, address: account, nonce, expires })), account] })
+  return { nonce, expires, signature, domain }
+}
+/** Admin only: publish (or re-publish) as a starter room at ?room=<slug>. Every asset the room uses becomes viewable by everyone (no copies). */
+export async function saveStarterRoom(slug, layout, { name, assetIds } = {}) {
+  const sig = await adminSig('publish', slug, await sha256(new TextEncoder().encode(JSON.stringify(layout)).buffer))
+  const r = await call('mysbase-starter-save', { slug, name, layout, kind: layout?.slots ? 'template' : 'room', assetIds: assetIds || [], sig })
+  for (const id of assetIds || []) { const m = metas.get(id); if (m) m.public = true }
+  return r
+}
+export async function setStarterHidden(slug, hidden) { return call('mysbase-starter-hide', { slug, hidden: !!hidden, sig: await adminSig(hidden ? 'hide' : 'show', slug) }) }
+export async function removeStarter(slug) { return call('mysbase-starter-delete', { slug, sig: await adminSig('remove', slug) }) }
+export async function adminStarters() { return (await call('mysbase-starter-admin')).starters || [] }
 export async function setAssetsPublic(ids, on = true) { const r = await call('mysbase-public', { ids, public: on }); for (const id of ids) { const m = metas.get(id); if (m) m.public = on }; return r }
 /** No session needed: a shared room or starter by code/slug (+ its public asset metas, merged so they load). */
-export async function loadShared(id) { const r = await pub('mysbase-shared', { id }); addPublicMetas(r.assets); return r }
+export async function loadShared(id) { let r; try { r = await pub('mysbase-shared', { id }) } catch (e) { if (!hasSession()) throw e; r = await call('mysbase-shared', { id }) } addPublicMetas(r.assets); return r }
 export async function starterList() { try { return (await pub('mysbase-starters')).starters || [] } catch { return [] } }
 export async function sharedList() { return hasSession() ? call('mysbase-shared-list') : { shared: [] } }
 export async function serverRoomList() { return hasSession() ? (await call('mysbase-rooms')).rooms || [] : [] }

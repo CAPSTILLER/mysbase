@@ -259,8 +259,6 @@ async function save() {
     $('rkStar').onclick = async () => {
       try {
         await cloud.saveStarterRoom(slug, layout, { name: K.name, assetIds: ids })
-        const priv = ids.filter(id => !cloud.allAssets().find(m => m.id === id)?.public)
-        if (priv.length && confirm(`Make the ${priv.length} assets of "${K.name}" public so visitors don't see placeholders?`)) await cloud.setAssetsPublic(priv, true)
         const u = `${location.origin}/?room=${slug}`; $('rkLink').innerHTML = `★ Starter room: <a href="${u}">${esc(u)}</a>`; A.starterAdded?.(slug, K.name)
       } catch (e) { A.toast('❌ ' + e.message) }
     }

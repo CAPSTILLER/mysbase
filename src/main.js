@@ -844,7 +844,7 @@ async function loadPreset(name) {
   if (await ensureAssets(j)) { refreshSlots(); buildSurfaces(); reflow() }
   tplUI()
 }
-async function mergeStarters() { for (const s of await cloud.starterList()) roomOption(s.slug, '★ ' + s.name); $('roomSel').value = new URLSearchParams(location.search).get('room') || $('roomSel').value }
+async function mergeStarters() { const cur = $('roomSel').value; for (const s of await cloud.starterList()) roomOption(s.slug, '★ ' + s.name); adminOptions(isAdmin); $('roomSel').value = cur; $('roomSel').value = new URLSearchParams(location.search).get('room') || $('roomSel').value }
 // ---------- template / share UI ----------
 function tplUI() {
   const box = $('slotList'); if (!box) return
@@ -884,24 +884,59 @@ $('bShare').onclick = async () => {
     navigator.clipboard?.writeText(link).catch(() => {}); toast(`Share code ${r.code} (link copied)`, 4000)
   } catch (e) { toast('❌ ' + (e?.message || e), 4000) }
 }
-async function checkAdmin() { try { if (cloud.signedIn()) $('starterRow').classList.toggle('hidden', !(await cloud.whoAmI()).admin) } catch { /* ignore */ } }
-$('tplSec').addEventListener('toggle', () => { if ($('tplSec').open) { tplUI(); checkAdmin() } })
-$('bSignIn').addEventListener('click', () => setTimeout(checkAdmin, 1500))
-$('bStarter').onclick = async () => {
+$('tplSec').addEventListener('toggle', () => { if ($('tplSec').open) { tplUI(); refreshAdmin() } })
+// ---------- admin: publish / manage starter rooms (Starter rooms dropdown) ----------
+let isAdmin = false
+function adminOptions(on) {
+  const sel = $('roomSel'); for (const v of ['__pub', '__manage', '__admin']) [...sel.options].find(o => o.value === v)?.remove()
+  if (!on && cloud.wallet().account && !cloud.signedIn()) sel.add(new Option('⚙ Admin tools (sign in)…', '__admin'))
+  if (on) { sel.add(new Option('⚙ Publish this room as a starter…', '__pub')); sel.add(new Option('⚙ Manage starter rooms…', '__manage')) }
+}
+async function publishRoom() {
   try {
-    if (!(await cloud.whoAmI()).admin) return toast('Only admin wallets can save starter rooms')
-    const name = prompt('Starter room name (everyone will see it)', tpl?.name || ''); if (!name) return
+    if (!(await cloud.whoAmI()).admin) return toast('Only admin wallets can publish starter rooms')
+    const cur = $('roomSel').selectedOptions[0], curName = (cur?.textContent || '').replace(/^[★#] /, '')
+    const name = prompt('Starter room name (everyone will see it).\nUse the same name to update an existing one.', tpl?.name || curName || ''); if (!name) return
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
-    if (!confirm(`Publish "${name}" as a starter room at ?room=${slug} ? (free signature, no gas)`)) return
-    const ids = usedAssetIds(), r = await cloud.saveStarterRoom(slug, serialize(), { name, assetIds: ids })
-    roomOption(r.slug, '★ ' + name)
-    const priv = ids.filter(id => !allAssets().find(a => a.id === id)?.public)
-    if (priv.length && confirm(`This room uses ${priv.length} private asset(s). Make them PUBLIC so visitors don't see placeholders?\n\n` + priv.map(id => '• ' + (allAssets().find(a => a.id === id)?.name || id)).join('\n'))) {
-      const p = await cloud.setAssetsPublic(priv, true); toast(`Starter "${name}" saved · ${p.updated} asset(s) now public`, 4000)
-    } else toast(`Starter "${name}" saved at ?room=${r.slug}${priv.length ? ' (assets stay private: visitors see placeholders)' : ''}`, 4000)
+    if (slug.length < 3) return toast('Name needs at least 3 letters/digits')
+    const ids = usedAssetIds(), priv = ids.filter(id => !allAssets().find(a => a.id === id)?.public)
+    if (!confirm(`Publish "${name}" at ?room=${slug} for everyone?\n\nIts ${ids.length} asset(s) become viewable by anyone (${priv.length} are private now). Your other private assets stay private. Free signature, no gas.`)) return
+    const r = await cloud.saveStarterRoom(slug, serialize(), { name, assetIds: ids })
+    roomOption(r.slug, '★ ' + name); adminOptions(isAdmin)
+    const u = new URLSearchParams(location.search); u.set('room', r.slug); history.replaceState(null, '', '?' + u)
+    toast(`★ "${name}" ${r.updated ? 'updated' : 'published'} · ${r.assets} asset(s) public · no files copied`, 4500)
   } catch (e) { toast('❌ ' + (e?.message || e), 4000) }
 }
-$('roomSel').onchange = e => { if (e.target.value === '__kit') roomKit.open(); else loadPreset(e.target.value) }
+async function manageStarters() {
+  $('starterMgr')?.remove()
+  const box = document.createElement('div'); box.id = 'starterMgr'; box.innerHTML = '<b>Starter rooms (admin)</b><span class="small">Loading…</span>'; document.body.appendChild(box)
+  const close = () => box.remove()
+  let list = []
+  try { list = await cloud.adminStarters() } catch (e) { box.querySelector('.small').textContent = '❌ ' + (e?.message || e) }
+  box.querySelector('.small').textContent = list.length ? 'Make private hides a room from everyone but admins. Remove deletes it.' : 'No published rooms yet.'
+  for (const s of list) {
+    const row = document.createElement('div'); row.className = 'smRow'
+    row.innerHTML = `<span class="smName">${s.hidden ? '🔒' : '★'} ${s.name.replace(/[<>&]/g, '')}<br><span class="small">?room=${s.slug}${s.hidden ? ' · private' : ''}</span></span>`
+    const bt = (t, f) => { const b = document.createElement('button'); b.textContent = t; b.onclick = f; row.appendChild(b); return b }
+    bt('Open', () => { close(); loadPreset(s.slug) })
+    bt(s.hidden ? 'Make public' : 'Make private', async () => { try { await cloud.setStarterHidden(s.slug, !s.hidden); toast(`"${s.name}" is now ${s.hidden ? 'public' : 'private'}`); if (!s.hidden) [...$('roomSel').options].find(o => o.value === s.slug)?.remove(); else roomOption(s.slug, '★ ' + s.name); manageStarters() } catch (e) { toast('❌ ' + (e?.message || e), 4000) } })
+    bt('Remove', async () => { if (!confirm(`Remove starter room "${s.name}" for everyone? This can't be undone (your assets stay in My assets).`)) return; try { await cloud.removeStarter(s.slug); [...$('roomSel').options].find(o => o.value === s.slug)?.remove(); toast(`Removed "${s.name}"`); manageStarters() } catch (e) { toast('❌ ' + (e?.message || e), 4000) } }).className = 'danger'
+    box.appendChild(row)
+  }
+  const x = document.createElement('button'); x.textContent = 'Close'; x.onclick = close; box.appendChild(x)
+}
+$('bStarter').onclick = publishRoom
+async function refreshAdmin() { try { isAdmin = cloud.signedIn() && !!(await cloud.whoAmI()).admin } catch { isAdmin = false } adminOptions(isAdmin); $('starterRow').classList.toggle('hidden', !isAdmin) }
+addEventListener('mysbase:wallet', () => setTimeout(refreshAdmin, 300))
+$('bSignIn').addEventListener('click', () => setTimeout(refreshAdmin, 2500))
+let lastRoom = 'starter'
+$('roomSel').onfocus = () => { if (!['__pub', '__manage', '__admin', '__kit'].includes($('roomSel').value)) lastRoom = $('roomSel').value }
+$('roomSel').onchange = e => {
+  const v = e.target.value
+  if (v === '__admin') { e.target.value = lastRoom; return cloud.whoAmI().then(m => { refreshAdmin(); toast(m.admin ? 'Admin tools added to this menu (⚙)' : 'This wallet is not an admin') }).catch(err => toast('❌ ' + (err?.message || err))) }
+  if (v === '__pub' || v === '__manage') { e.target.value = lastRoom; return v === '__pub' ? publishRoom() : manageStarters() }
+  if (v === '__kit') roomKit.open(); else { lastRoom = v; loadPreset(v) }
+}
 
 // ---------- boot ----------
 new GLTFLoader().load('/assets/rock1-clay.glb', g => {

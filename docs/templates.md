@@ -97,8 +97,10 @@ For ceiling items use `"mount": "ceiling"`. Floor items settle on the floor auto
 | `mysbase-shared` | none | `{id}` (code or slug) → `{id, name, kind, starter, layout, assets: [public metas]}` |
 | `mysbase-starters` | none | → `{starters: [{slug, name, savedAt}]}` |
 | `mysbase-shared-list` | session | → `{shared: [your codes + starters], admin}` |
-| `mysbase-starter-save` | admin | `{slug, name, layout, assetIds}` → `{slug}` |
-| `mysbase-starter-delete` | admin | `{slug}` |
+| `mysbase-starter-save` | admin + fresh sig | `{slug, name, layout, assetIds, sig}` → `{slug, updated, assets}`; every asset the room uses becomes public (ref-counted, no copies) |
+| `mysbase-starter-hide` | admin + fresh sig | `{slug, hidden, sig}`: make private / public again |
+| `mysbase-starter-delete` | admin + fresh sig | `{slug, sig}`: assets go private unless another public room uses them |
+| `mysbase-starter-admin` | admin | → `{starters: [{slug, name, hidden}]}` |
 | `mysbase-public` | admin | `{ids: [...], public: true/false}` → `{updated}` |
 | `mysbase-public-url` | none | `{id, file}` → `{url, proxy}` (public assets only) |
 | `mysbase-me` | session | → `{address, admin}` |

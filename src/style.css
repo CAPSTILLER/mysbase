@@ -111,3 +111,6 @@ body.guest .srvOnly { display: none !important; }
 .kCard.expired{opacity:.75}
 .kReveal{background:#c9a227;color:#111;border:0;font-weight:700}
 #bKey.on{background:#c9a227;color:#111}
+
+#starterMgr{position:fixed;inset:auto 8px 8px 8px;max-width:420px;max-height:80vh;overflow:auto;margin:auto;background:#fff;border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;box-shadow:0 4px 20px #0008;z-index:100}
+#starterMgr .smRow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;border-top:1px solid #eee;padding-top:6px}#starterMgr .smName{flex:1 1 100%}#starterMgr button.danger{color:#b00}
