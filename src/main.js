@@ -939,7 +939,7 @@ function adminSheet() {
   box.innerHTML = '<b>⚙ Admin</b><span class="small">Checking this wallet…</span>'
   cloud.isAdminAddress(a).then(ok => {
     isAdmin = ok; adminOptions(ok)
-    if (!ok) { box.innerHTML = `<b>This wallet isn't an admin</b><span class="small" style="word-break:break-all">${a}</span>`; bt('Close', close); return }
+    if (!ok) { box.innerHTML = `<b>This wallet isn't an admin</b><span class="small">Connect the wallet that holds a CAPs Mind key.</span><span class="small" style="word-break:break-all">${a}</span>`; bt('Close', close); return }
     box.innerHTML = `<b>⚙ Admin · starter rooms</b><span class="small">${a.slice(0, 6)}…${a.slice(-4)} · you sign a free message for each change (no gas).</span>`
     bt('★ Publish this room', () => { close(); publishRoom() })
     bt('Manage starter rooms', () => { close(); manageStarters() })
