@@ -408,7 +408,6 @@ export async function prepare(fileName, ext, buf, folder, over = {}) {
   let obj = null, why = '', animations = []
   try { ({ scene: obj, animations } = await parse(ext, buf.slice(0))) } catch (e) { why = e?.message || 'could not read' }
   if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
-  if (!skipPrep && obj && ext === 'glb' && (f.size > PREP_SUGGEST_BYTES || (hasSkin(obj) && animations.length))) return prepOffer(f, buf, hasSkin(obj))
   if (!obj) return { meta: { id, name, folder, kind: 'model', sourceFormat: ext, original, needsConverter: true, note: (ext === 'gltf' ? 'GLTF with external files: zip a .glb instead. ' : '') + why.slice(0, 180) }, blobs: { [origFile]: ob } }
   const raw = measure(obj), unit = raw.y > 50 ? (raw.y > 500 ? 'mm' : 'cm') : 'm', s = UNITS[unit]
   const root = new THREE.Group(); root.add(obj); obj.scale.multiplyScalar(s); obj.updateMatrixWorld(true)
@@ -509,6 +508,7 @@ async function pick(f, skipPrep = false) {
   let obj = null, why = '', animations = []
   try { ({ scene: obj, animations } = await parse(ext, buf.slice(0))) } catch (e) { why = e?.message || 'could not read' }
   if (obj && measure(obj).lengthSq() === 0) { obj = null; why = 'empty model' }
+  if (!skipPrep && obj && ext === 'glb' && (f.size > PREP_SUGGEST_BYTES || (hasSkin(obj) && animations.length))) return prepOffer(f, buf, hasSkin(obj))
   if (!obj) {
     const fm = form(`<b>${ext.toUpperCase()} can't be converted in the browser (${why}).</b><div class="small">It can be stored as the original only, marked "needs converter" (not placeable yet).</div>
       <div class="row"><button id="afGo">Store original</button><button id="afX">Cancel</button></div>`)
