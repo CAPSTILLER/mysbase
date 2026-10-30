@@ -681,6 +681,7 @@ export async function saveStarterRoom(slug, layout, { name, assetIds } = {}) {
 }
 export async function setStarterHidden(slug, hidden) { return call('mysbase-starter-hide', { slug, hidden: !!hidden, sig: await adminSig(hidden ? 'hide' : 'show', slug) }) }
 export async function removeStarter(slug) { return call('mysbase-starter-delete', { slug, sig: await adminSig('remove', slug) }) }
+export async function isAdminAddress(a = account) { if (!a) return false; try { return !!(await pub('mysbase-is-admin', { address: a })).admin } catch { return false } }
 export async function adminStarters() { return (await call('mysbase-starter-admin')).starters || [] }
 export async function setAssetsPublic(ids, on = true) { const r = await call('mysbase-public', { ids, public: on }); for (const id of ids) { const m = metas.get(id); if (m) m.public = on }; return r }
 /** No session needed: a shared room or starter by code/slug (+ its public asset metas, merged so they load). */

@@ -889,7 +889,6 @@ $('tplSec').addEventListener('toggle', () => { if ($('tplSec').open) { tplUI(); 
 let isAdmin = false
 function adminOptions(on) {
   const sel = $('roomSel'); for (const v of ['__pub', '__manage', '__admin']) [...sel.options].find(o => o.value === v)?.remove()
-  if (!on && cloud.wallet().account && !cloud.signedIn()) sel.add(new Option('⚙ Admin tools (sign in)…', '__admin'))
   if (on) { sel.add(new Option('⚙ Publish this room as a starter…', '__pub')); sel.add(new Option('⚙ Manage starter rooms…', '__manage')) }
 }
 async function publishRoom() {
@@ -926,7 +925,28 @@ async function manageStarters() {
   const x = document.createElement('button'); x.textContent = 'Close'; x.onclick = close; box.appendChild(x)
 }
 $('bStarter').onclick = publishRoom
-async function refreshAdmin() { try { isAdmin = cloud.signedIn() && !!(await cloud.whoAmI()).admin } catch { isAdmin = false } adminOptions(isAdmin); $('starterRow').classList.toggle('hidden', !isAdmin) }
+async function refreshAdmin() {
+  const a = cloud.wallet().account
+  $('bAdmin').classList.toggle('hidden', !a)
+  isAdmin = a ? await cloud.isAdminAddress(a) : false
+  adminOptions(isAdmin); $('starterRow').classList.toggle('hidden', !isAdmin)
+}
+function adminSheet() {
+  $('starterMgr')?.remove()
+  const a = cloud.wallet().account, box = document.createElement('div'); box.id = 'starterMgr'; document.body.appendChild(box)
+  const close = () => box.remove(), bt = (t, f) => { const b = document.createElement('button'); b.textContent = t; b.onclick = f; box.appendChild(b); return b }
+  if (!a) { box.innerHTML = '<b>Admin</b><span class="small">Connect a wallet first.</span>'; bt('Close', close); return }
+  box.innerHTML = '<b>⚙ Admin</b><span class="small">Checking this wallet…</span>'
+  cloud.isAdminAddress(a).then(ok => {
+    isAdmin = ok; adminOptions(ok)
+    if (!ok) { box.innerHTML = `<b>This wallet isn't an admin</b><span class="small" style="word-break:break-all">${a}</span>`; bt('Close', close); return }
+    box.innerHTML = `<b>⚙ Admin · starter rooms</b><span class="small">${a.slice(0, 6)}…${a.slice(-4)} · you sign a free message for each change (no gas).</span>`
+    bt('★ Publish this room', () => { close(); publishRoom() })
+    bt('Manage starter rooms', () => { close(); manageStarters() })
+    bt('Close', close)
+  })
+}
+$('bAdmin').onclick = adminSheet
 addEventListener('mysbase:wallet', () => setTimeout(refreshAdmin, 300))
 $('bSignIn').addEventListener('click', () => setTimeout(refreshAdmin, 2500))
 let lastRoom = 'starter'
